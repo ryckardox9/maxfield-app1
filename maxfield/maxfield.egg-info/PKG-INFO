@@ -1,0 +1,15 @@
+Metadata-Version: 2.1
+Name: maxfield
+Version: 4.0
+Summary: Ingress Maxfield: An Ingress Linking and Fielding Strategy Generator
+Author: Trey V. Wenger
+Author-email: tvwenger@gmail.com
+License-File: LICENSE.md
+Requires-Dist: numpy
+Requires-Dist: networkx
+Requires-Dist: scipy
+Requires-Dist: ortools
+Requires-Dist: protobuf==3.19.4
+Requires-Dist: matplotlib
+Requires-Dist: imageio
+Requires-Dist: pygifsicle
