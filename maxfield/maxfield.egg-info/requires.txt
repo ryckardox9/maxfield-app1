@@ -1,0 +1,8 @@
+numpy
+networkx
+scipy
+ortools
+protobuf==3.19.4
+matplotlib
+imageio
+pygifsicle
