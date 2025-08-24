@@ -1,1 +1,1 @@
-from .maxfield_main import maxfield
+from .maxfield import maxfield

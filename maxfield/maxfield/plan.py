@@ -29,39 +29,7 @@ import time
 import multiprocessing as mp
 import numpy as np
 import networkx as nx
-# Tenta SciPy; se não houver, usa um fallback em NumPy (monotone chain)
-try:
-    from scipy.spatial import ConvexHull  # type: ignore
-except Exception:
-    import numpy as _np
-
-    def _cross(o, a, b):
-        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
-
-    def _monotone_chain(points):
-        pts = _np.asarray(points)
-        idx = _np.arange(len(pts))
-        order = _np.lexsort((pts[:,1], pts[:,0]))
-        pts = pts[order]
-        idx = idx[order]
-        lower = []
-        for i, p in enumerate(pts):
-            while len(lower) >= 2 and _cross(pts[lower[-2]], pts[lower[-1]], p) <= 0:
-                lower.pop()
-            lower.append(i)
-        upper = []
-        for i, p in enumerate(pts[::-1]):
-            while len(upper) >= 2 and _cross(pts[upper[-2]], pts[upper[-1]], p) <= 0:
-                upper.pop()
-            upper.append(len(pts)-1-i)
-        hull_idx_sorted = lower[:-1] + upper[:-1]
-        return [int(idx[j]) for j in hull_idx_sorted]
-
-    class ConvexHull:
-        def __init__(self, points):
-            self.points = _np.asarray(points)
-            self.vertices = _monotone_chain(self.points)
-
+from scipy.spatial import ConvexHull
 from . import geometry
 from .generator import Generator, reset
 from .router import Router
