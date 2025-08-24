@@ -18,7 +18,7 @@ sys.modules["pygifsicle"] = fake
 # --------------------------------------------------------------------------
 
 # Importa o Maxfield (use a pasta copiada: maxfield/)
-from maxfield.maxfield import maxfield as run_maxfield
+import maxfield
 
 st.set_page_config(page_title="Maxfield Online (Protótipo)", page_icon="🗺️", layout="centered")
 st.title("Ingress Maxfield — Gerador de Planos (Protótipo)")
@@ -78,7 +78,7 @@ if submitted:
     st.info("Processando o plano... aguarde.")
     try:
         # Chama a função principal do Maxfield
-        run_maxfield(
+        maxfield.maxfield(
             portal_path,
             num_agents=int(num_agents),
             num_cpus=int(num_cpus),
