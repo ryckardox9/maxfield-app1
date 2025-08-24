@@ -27,7 +27,7 @@ st.markdown(
     """
     - Envie o **arquivo .txt de portais** (mesmo formato que você já usa no Maxfield) **ou** cole o conteúdo.
     - Informe **nº de agentes** e **CPUs**.
-    - O mapa de fundo usará automaticamente sua chave do Google configurada nos *secrets*.
+    - (Opcional) Adicione uma **Google Maps API key** para ter o **mapa de fundo**.
     - Ao final, baixe o **.zip** com tudo ou os arquivos individuais.
     """
 )
@@ -44,6 +44,12 @@ with st.form("plan_form"):
 
     team = st.selectbox("Facção (cores)", ["Enlightened (verde)", "Resistance (azul)"])
     output_csv = st.checkbox("Gerar CSV", value=True)
+
+    st.markdown("**Mapa de fundo (opcional):**")
+    google_key_default = st.secrets.get("GOOGLE_API_KEY", "")
+    google_secret_default = st.secrets.get("GOOGLE_API_SECRET", "")
+    google_api_key = st.text_input("Google Maps API key", value=google_key_default, help="Sem isso o fundo ficará branco.")
+    google_api_secret = st.text_input("Google Maps API secret (opcional)", type="password", value=google_secret_default)
 
     submitted = st.form_submit_button("Gerar plano")
 
@@ -69,10 +75,6 @@ if submitted:
     # Converte facção -> esquema de cor do Maxfield
     res_colors = team.startswith("Resistance")
 
-    # --------- Chaves do Google: somente dos secrets ----------
-    google_api_key = st.secrets.get("GOOGLE_API_KEY", None)
-    google_api_secret = st.secrets.get("GOOGLE_API_SECRET", None)
-
     st.info("Processando o plano... aguarde.")
     try:
         # Chama a função principal do Maxfield
@@ -81,8 +83,8 @@ if submitted:
             num_agents=int(num_agents),
             num_cpus=int(num_cpus),
             res_colors=res_colors,
-            google_api_key=google_api_key,
-            google_api_secret=google_api_secret,
+            google_api_key=(google_api_key or None),
+            google_api_secret=(google_api_secret or None),
             output_csv=output_csv,
             outdir=outdir,
             verbose=True
@@ -115,7 +117,7 @@ if submitted:
         with open(zip_path, "rb") as f:
             st.download_button("Baixar todos os arquivos (.zip)", data=f.read(), file_name=os.path.basename(zip_path), mime="application/zip")
 
-        st.caption("Observação: se não houver Google API key nos *secrets*, o fundo do mapa ficará branco (apenas portais/links).")
+        st.caption("Observação: sem Google API key o fundo do mapa ficará branco (apenas portais/links).")
 
     except Exception as e:
         st.error(f"Erro ao gerar o plano: {e}")
