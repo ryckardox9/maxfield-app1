@@ -29,7 +29,7 @@ import time
 import multiprocessing as mp
 import numpy as np
 import networkx as nx
-# Tenta usar SciPy; se não houver, usa fallback em NumPy
+# Tenta SciPy; se não houver, usa um fallback em NumPy (monotone chain)
 try:
     from scipy.spatial import ConvexHull  # type: ignore
 except Exception:
@@ -39,17 +39,11 @@ except Exception:
         return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
 
     def _monotone_chain(points):
-        """
-        points: ndarray (N, 2)
-        retorna: lista de índices do casco convexo em ordem CCW
-        """
         pts = _np.asarray(points)
         idx = _np.arange(len(pts))
-        # ordena por x, depois y, mantendo índices originais
         order = _np.lexsort((pts[:,1], pts[:,0]))
         pts = pts[order]
         idx = idx[order]
-
         lower = []
         for i, p in enumerate(pts):
             while len(lower) >= 2 and _cross(pts[lower[-2]], pts[lower[-1]], p) <= 0:
@@ -60,13 +54,10 @@ except Exception:
             while len(upper) >= 2 and _cross(pts[upper[-2]], pts[upper[-1]], p) <= 0:
                 upper.pop()
             upper.append(len(pts)-1-i)
+        hull_idx_sorted = lower[:-1] + upper[:-1]
+        return [int(idx[j]) for j in hull_idx_sorted]
 
-        hull_idx_sorted = lower[:-1] + upper[:-1]  # indices no array ordenado
-        # converte de volta para os índices do array original
-        hull_orig_idx = [int(idx[j]) for j in hull_idx_sorted]
-        return hull_orig_idx
-
-    class ConvexHull:  # compatível com uso básico do SciPy
+    class ConvexHull:
         def __init__(self, points):
             self.points = _np.asarray(points)
             self.vertices = _monotone_chain(self.points)
