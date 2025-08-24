@@ -1,24 +1,52 @@
-import os
-import io
-import sys
-import types
-import zipfile
-import tempfile
+import os, sys, types, zipfile, tempfile, traceback
 from datetime import datetime
-
 import streamlit as st
 
-# --- Desliga o optimize() do pygifsicle (para não depender do gifsicle) ---
+st.set_page_config(page_title="Maxfield Online (Protótipo)", page_icon="🗺️", layout="centered")
+
+st.subheader("🔎 Diagnóstico de inicialização")
+st.write("Python:", sys.version)
+st.write("CWD:", os.getcwd())
+try:
+    st.write("Raiz do repo:", os.listdir("."))
+except Exception as e:
+    st.error(f"listdir . falhou: {e}")
+
+# Confere se a pasta 'maxfield' existe e é pacote
+if not os.path.isdir("maxfield"):
+    st.error("Pasta 'maxfield' NÃO encontrada na raiz do projeto. Verifique se existe 'maxfield/'.")
+else:
+    try:
+        st.write("Conteúdo de maxfield/:", os.listdir("maxfield"))
+    except Exception as e:
+        st.error(f"listdir maxfield falhou: {e}")
+
+    # É importante existir um __init__.py para ser pacote Python
+    if not os.path.isfile(os.path.join("maxfield", "__init__.py")):
+        st.error("Falta 'maxfield/__init__.py'. Crie um arquivo vazio com esse nome.")
+    # Também conferimos a pasta interna
+    inner_pkg = os.path.join("maxfield", "maxfield")
+    if not os.path.isdir(inner_pkg):
+        st.error("Falta a pasta 'maxfield/maxfield'.")
+    else:
+        st.write("Conteúdo de maxfield/maxfield:", os.listdir(inner_pkg))
+        if not os.path.isfile(os.path.join(inner_pkg, "__init__.py")):
+            st.error("Falta 'maxfield/maxfield/__init__.py' (deve conter: from .maxfield_main import maxfield)")
+
+# Desliga optimize() do pygifsicle para não depender de gifsicle
 fake = types.ModuleType("pygifsicle")
-def optimize(*args, **kwargs):
-    # no-op
-    return
+def optimize(*args, **kwargs): return
 fake.optimize = optimize
 sys.modules["pygifsicle"] = fake
-# --------------------------------------------------------------------------
 
-# Importa a função principal do Maxfield a partir do submódulo
-from maxfield.maxfield import maxfield as run_maxfield
+# Tenta importar a função maxfield com try/except para exibir erro completo
+try:
+    from maxfield.maxfield import maxfield as run_maxfield
+    st.success("Import OK: from maxfield.maxfield import maxfield")
+except Exception as imp_err:
+    st.error("Falha ao importar 'from maxfield.maxfield import maxfield as run_maxfield'")
+    st.exception(imp_err)
+    st.stop()
 
 st.set_page_config(page_title="Maxfield Online (Protótipo)", page_icon="🗺️", layout="centered")
 st.title("Ingress Maxfield — Gerador de Planos (Protótipo)")
