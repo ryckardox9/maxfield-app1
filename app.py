@@ -1,5 +1,4 @@
 import os
-import io
 import sys
 import types
 import zipfile
@@ -46,10 +45,9 @@ with st.form("plan_form"):
     output_csv = st.checkbox("Gerar CSV", value=True)
 
     st.markdown("**Mapa de fundo (opcional):**")
-    google_key_default = st.secrets.get("GOOGLE_API_KEY", "")
-    google_secret_default = st.secrets.get("GOOGLE_API_SECRET", "")
-    google_api_key = st.text_input("Google Maps API key", value=google_key_default, help="Sem isso o fundo ficará branco.")
-    google_api_secret = st.text_input("Google Maps API secret (opcional)", type="password", value=google_secret_default)
+    # ⚠️ NÃO preencher valor com o secret (para não expor a chave no UI)
+    google_api_key_input = st.text_input("Google Maps API key", value="", help="Sem isso o fundo ficará branco.")
+    google_api_secret_input = st.text_input("Google Maps API secret (opcional)", type="password", value="")
 
     submitted = st.form_submit_button("Gerar plano")
 
@@ -65,15 +63,22 @@ if submitted:
 
     # Salva o arquivo de portais
     portal_path = os.path.join(workdir, "portais.txt")
-    if uploaded:
-        data = uploaded.getvalue()
-    else:
-        data = txt_content.encode("utf-8")
+    data = uploaded.getvalue() if uploaded else txt_content.encode("utf-8")
     with open(portal_path, "wb") as f:
         f.write(data)
 
     # Converte facção -> esquema de cor do Maxfield
     res_colors = team.startswith("Resistance")
+
+    # --------- Chaves do Google: prioridade (input do usuário) -> secrets ----------
+    google_api_key = (google_api_key_input or "").strip()
+    google_api_secret = (google_api_secret_input or "").strip()
+
+    if not google_api_key:
+        google_api_key = st.secrets.get("GOOGLE_API_KEY", None)
+    if not google_api_secret:
+        google_api_secret = st.secrets.get("GOOGLE_API_SECRET", None)
+    # -------------------------------------------------------------------------------
 
     st.info("Processando o plano... aguarde.")
     try:
@@ -83,8 +88,8 @@ if submitted:
             num_agents=int(num_agents),
             num_cpus=int(num_cpus),
             res_colors=res_colors,
-            google_api_key=(google_api_key or None),
-            google_api_secret=(google_api_secret or None),
+            google_api_key=google_api_key,
+            google_api_secret=google_api_secret,
             output_csv=output_csv,
             outdir=outdir,
             verbose=True
@@ -117,7 +122,8 @@ if submitted:
         with open(zip_path, "rb") as f:
             st.download_button("Baixar todos os arquivos (.zip)", data=f.read(), file_name=os.path.basename(zip_path), mime="application/zip")
 
-        st.caption("Observação: sem Google API key o fundo do mapa ficará branco (apenas portais/links).")
+        if not google_api_key:
+            st.caption("Observação: sem Google API key o fundo do mapa ficará branco (apenas portais/links).")
 
     except Exception as e:
         st.error(f"Erro ao gerar o plano: {e}")
