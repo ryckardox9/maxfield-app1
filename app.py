@@ -23,20 +23,28 @@ from maxfield.maxfield import maxfield as run_maxfield
 # ---------- Config do Streamlit ----------
 st.set_page_config(page_title="Maxfield Online (Protótipo)", page_icon="🗺️", layout="centered")
 
-# Fundo do site via CSS (puxa URL do secrets ou mostra cor padrão)
-bg_url = st.secrets.get("UI_BG_URL", "")
+# ===== Fundo do site (usa BG_URL dos secrets) =====
+bg_url = st.secrets.get("BG_URL", "").strip()
 if bg_url:
     st.markdown(
         f"""
         <style>
+        /* Fundo de tela */
         .stApp {{
             background: url('{bg_url}') no-repeat center center fixed;
             background-size: cover;
+        }}
+        /* Caixa translúcida pra leitura melhor */
+        .stApp .block-container {{
+            background: rgba(255,255,255,0.85);
+            border-radius: 12px;
+            padding: 1rem 1.2rem 2rem 1.2rem;
         }}
         </style>
         """,
         unsafe_allow_html=True
     )
+# ==================================================
 
 # ---------- Título ----------
 st.title("Ingress Maxfield — Gerador de Planos (Protótipo)")
