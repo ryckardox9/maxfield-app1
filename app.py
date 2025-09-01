@@ -4,6 +4,7 @@ import sys
 import types
 import zipfile
 import tempfile
+import sqlite3
 from datetime import datetime
 from contextlib import redirect_stdout
 
@@ -46,8 +47,48 @@ if bg_url:
     )
 # ==================================================
 
+# ---------- Persistência simples (SQLite) ----------
+@st.cache_resource(show_spinner=False)
+def get_db():
+    os.makedirs("data", exist_ok=True)
+    db_path = os.path.join("data", "app.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS metrics (
+            key   TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )
+    """)
+    # inicializa chaves
+    for k in ("visits", "plans_completed"):
+        conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
+    conn.commit()
+    return conn
+
+def inc_metric(key: str, delta: int = 1):
+    conn = get_db()
+    conn.execute("UPDATE metrics SET value = value + ? WHERE key = ?", (delta, key))
+    conn.commit()
+
+def get_metric(key: str) -> int:
+    cur = get_db().execute("SELECT value FROM metrics WHERE key=?", (key,))
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+# Conta visita 1x por sessão
+if "visit_counted" not in st.session_state:
+    inc_metric("visits", 1)
+    st.session_state["visit_counted"] = True
+
 # ---------- Título ----------
 st.title("Ingress Maxfield — Gerador de Planos (Protótipo)")
+
+# KPIs
+colv, colp = st.columns(2)
+with colv:
+    st.metric("Acessos (sessões)", f"{get_metric('visits'):,}")
+with colp:
+    st.metric("Planos gerados", f"{get_metric('plans_completed'):,}")
 
 st.markdown(
     """
@@ -125,10 +166,31 @@ def processar_plano(portal_bytes: bytes,
 
     return {"zip_bytes": zip_bytes, "pm_bytes": pm_bytes, "lm_bytes": lm_bytes, "gif_bytes": gif_bytes, "log_txt": log_txt}
 
+# ---------- Exemplo de entrada (.txt) ----------
+EXEMPLO_TXT = """# Exemplo de arquivo de portais (uma linha por portal)
+# Formato: Nome do Portal; URL do Intel (com pll=LAT,LON)
+Portal 1; https://intel.ingress.com/intel?pll=-10.912345,-37.065432
+Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
+Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
+"""
+
 # ---------- UI ----------
 with st.form("plan_form"):
     uploaded = st.file_uploader("Arquivo de portais (.txt)", type=["txt"])
-    txt_content = st.text_area("Ou cole o conteúdo do arquivo de portais", height=200, placeholder="Portal 1; https://www.ingress.com/intel?...pll=LAT,LON\nPortal 2; ...")
+    txt_content = st.text_area(
+        "Ou cole o conteúdo do arquivo de portais",
+        height=200,
+        placeholder="Portal 1; https://www.ingress.com/intel?...pll=LAT,LON\nPortal 2; ..."
+    )
+
+    # Botão para baixar o modelo de entrada
+    st.download_button(
+        "📄 Baixar modelo (.txt)",
+        data=EXEMPLO_TXT.encode("utf-8"),
+        file_name="modelo_portais.txt",
+        mime="text/plain",
+        help="Baixe um modelo de como preparar o .txt de portais",
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -140,12 +202,20 @@ with st.form("plan_form"):
     output_csv = st.checkbox("Gerar CSV", value=True)
 
     st.markdown("**Mapa de fundo (opcional):**")
-    google_key_input = st.text_input("Google Maps API key (opcional)", value="", help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente.")
+    google_key_input = st.text_input(
+        "Google Maps API key (opcional)",
+        value="",
+        help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente."
+    )
     google_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password")
 
     gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=False)
 
     submitted = st.form_submit_button("Gerar plano")
+
+# Link de tutorial (se tiver nos secrets usamos, senão cai no YouTube genérico)
+TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
+st.link_button("▶️ Tutorial (YouTube)", TUTORIAL_URL)
 
 if submitted:
     if uploaded:
@@ -163,7 +233,9 @@ if submitted:
     n_portais = contar_portais(texto_portais)
     fazer_gif = bool(gerar_gif_checkbox)
     if n_portais > 25 and fazer_gif:
-        st.warning(f"Detectei **{n_portais} portais**. Para evitar travamentos, o GIF foi **desativado automaticamente**.")
+        st.warning(
+            f"Detectei **{n_portais} portais**. Para evitar travamentos, o GIF foi **desativado automaticamente**."
+        )
         fazer_gif = False
 
     google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
@@ -183,12 +255,20 @@ if submitted:
         )
         st.success("Plano gerado com sucesso!")
 
+        # incrementa métrica de planos gerados
+        inc_metric("plans_completed", 1)
+
         if result["pm_bytes"]:
             st.image(result["pm_bytes"], caption="Portal Map")
         if result["lm_bytes"]:
             st.image(result["lm_bytes"], caption="Link Map")
         if result["gif_bytes"]:
-            st.download_button("Baixar GIF (plan_movie.gif)", data=result["gif_bytes"], file_name="plan_movie.gif", mime="image/gif")
+            st.download_button(
+                "Baixar GIF (plan_movie.gif)",
+                data=result["gif_bytes"],
+                file_name="plan_movie.gif",
+                mime="image/gif"
+            )
 
         st.download_button(
             "Baixar todos os arquivos (.zip)",
@@ -212,7 +292,6 @@ if pix_qr_url:
     st.image(pix_qr_url, caption="Use o QR Code para doar via PIX", width=200)
 
 st.markdown("Ou copie a chave PIX (celular): **+55 79 99816-0693**")
-
 st.markdown(
     "[📲 Entrar em contato no WhatsApp](https://wa.me/5579998160693)",
     unsafe_allow_html=True,
