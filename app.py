@@ -183,15 +183,6 @@ with st.form("plan_form"):
         placeholder="Portal 1; https://www.ingress.com/intel?...pll=LAT,LON\nPortal 2; ..."
     )
 
-    # Botão para baixar o modelo de entrada
-    st.download_button(
-        "📄 Baixar modelo (.txt)",
-        data=EXEMPLO_TXT.encode("utf-8"),
-        file_name="modelo_portais.txt",
-        mime="text/plain",
-        help="Baixe um modelo de como preparar o .txt de portais",
-    )
-
     col1, col2 = st.columns(2)
     with col1:
         num_agents = st.number_input("Número de agentes", min_value=1, max_value=50, value=1, step=1)
@@ -213,9 +204,19 @@ with st.form("plan_form"):
 
     submitted = st.form_submit_button("Gerar plano")
 
-# Link de tutorial (se tiver nos secrets usamos, senão cai no YouTube genérico)
-TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
-st.link_button("▶️ Tutorial (YouTube)", TUTORIAL_URL)
+# Botões/links FORA do form (download em form dá erro)
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button(
+        "📄 Baixar modelo (.txt)",
+        data=EXEMPLO_TXT.encode("utf-8"),
+        file_name="modelo_portais.txt",
+        mime="text/plain",
+        help="Baixe um modelo de como preparar o .txt de portais",
+    )
+with c2:
+    TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
+    st.link_button("▶️ Tutorial (YouTube)", TUTORIAL_URL)
 
 if submitted:
     if uploaded:
