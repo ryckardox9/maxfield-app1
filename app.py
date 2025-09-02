@@ -5,37 +5,43 @@ import types
 import zipfile
 import tempfile
 import sqlite3
+import time
+import threading
+import statistics
 from datetime import datetime
 from contextlib import redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 
-# --- Desliga o optimize() do pygifsicle (para não depender do gifsicle) ---
+# ---------- Pygifsicle stub (evita depender do gifsicle) ----------
 fake = types.ModuleType("pygifsicle")
 def optimize(*args, **kwargs):
     return
 fake.optimize = optimize
 sys.modules["pygifsicle"] = fake
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
-# Importa o Maxfield
+# Maxfield
 from maxfield.maxfield import maxfield as run_maxfield
 
 # ---------- Config do Streamlit ----------
-st.set_page_config(page_title="Maxfield Online (Protótipo)", page_icon="🗺️", layout="centered")
+st.set_page_config(
+    page_title="Maxfield Online",
+    page_icon="🗺️",
+    layout="centered",
+)
 
-# ===== Fundo do site (usa BG_URL dos secrets) =====
+# ===== Fundo (usa BG_URL dos secrets) =====
 bg_url = st.secrets.get("BG_URL", "").strip()
 if bg_url:
     st.markdown(
         f"""
         <style>
-        /* Fundo de tela */
         .stApp {{
             background: url('{bg_url}') no-repeat center center fixed;
             background-size: cover;
         }}
-        /* Caixa translúcida pra leitura melhor */
         .stApp .block-container {{
             background: rgba(255,255,255,0.85);
             border-radius: 12px;
@@ -45,7 +51,6 @@ if bg_url:
         """,
         unsafe_allow_html=True
     )
-# ==================================================
 
 # ---------- Persistência simples (SQLite) ----------
 @st.cache_resource(show_spinner=False)
@@ -59,7 +64,6 @@ def get_db():
             value INTEGER NOT NULL
         )
     """)
-    # inicializa chaves
     for k in ("visits", "plans_completed"):
         conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
     conn.commit()
@@ -75,32 +79,44 @@ def get_metric(key: str) -> int:
     row = cur.fetchone()
     return int(row[0]) if row else 0
 
+# histórico de durações para melhorar ETA
+def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
+    conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs(
+            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
+        )
+    """)
+    conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
+                 (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)))
+    conn.commit()
+
+def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
+    # “chute” inicial
+    base_pp = 0.35 if not gif else 0.55  # s por portal
+    base_overhead = 3.0 if not gif else 8.0
+    cpu_factor = 1.0 / max(1.0, (0.6 + 0.5*min(num_cpus, 8)**0.5))
+    est = (base_overhead + base_pp*n_portais) * cpu_factor
+
+    # refina com histórico recente
+    cur = get_db().execute("""
+        SELECT dur_s, n_portais FROM runs
+        WHERE gif=? ORDER BY ts DESC LIMIT 50
+    """, (1 if gif else 0,))
+    rows = cur.fetchall()
+    if rows:
+        pps = [r[0]/max(1, r[1]) for r in rows if r[1] > 0]
+        if pps:
+            pp_med = statistics.median(pps)
+            est = (pp_med * n_portais) * cpu_factor + (1.5 if not gif else 4.0)
+    return max(2.0, est)
+
 # Conta visita 1x por sessão
 if "visit_counted" not in st.session_state:
     inc_metric("visits", 1)
     st.session_state["visit_counted"] = True
 
-# ---------- Título ----------
-st.title("Ingress Maxfield — Gerador de Planos (Protótipo)")
-
-# KPIs
-colv, colp = st.columns(2)
-with colv:
-    st.metric("Acessos (sessões)", f"{get_metric('visits'):,}")
-with colp:
-    st.metric("Planos gerados", f"{get_metric('plans_completed'):,}")
-
-st.markdown(
-    """
-    - Envie o **arquivo .txt de portais** (mesmo formato do Maxfield) **ou** cole o conteúdo.
-    - Informe **nº de agentes** e **CPUs**.
-    - **Mapa de fundo (opcional)**: informe uma **Google Maps API key**. 
-      Se deixar vazio e houver chave em `secrets`, ela será usada automaticamente.
-    - Resultados: imagens, CSVs e (se permitido) **GIF** com o passo-a-passo.
-    """
-)
-
-# ---------- utilitários ----------
+# ---------- Utilitários ----------
 def contar_portais(texto: str) -> int:
     cnt = 0
     for ln in texto.splitlines():
@@ -174,12 +190,156 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- UI ----------
+# ---------- Userscript IITC (GET ?list=...) ----------
+DEST = "https://maxfield.fun/"  # domínio público do seu app
+IITC_USERSCRIPT = f"""// ==UserScript==
+// @name         Send portals to Maxfield (viewport-only + fallback)
+// @namespace    {DEST}
+// @version      0.3
+// @description  Envia apenas os portais visíveis no mapa do IITC para maxfield.fun; tem limite, zoom mínimo e fallback p/ clipboard.
+// @match        https://intel.ingress.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {{
+  'use strict';
+  const MIN_ZOOM = 15;
+  const MAX_PORTALS = 200;
+  const MAX_URL_LEN = 6000;
+  const DEST = "{DEST}";
+
+  function visiblePortals() {{
+    const bounds = window.map.getBounds();
+    const out = [];
+    for (const id in window.portals) {{
+      const p = window.portals[id];
+      if (!p || !p.getLatLng) continue;
+      const ll = p.getLatLng();
+      if (!bounds.contains(ll)) continue;
+
+      const lat = ll.lat.toFixed(6);
+      const lng = ll.lng.toFixed(6);
+      const name = (p.options?.data?.title || 'Portal');
+      out.push(`${{name}}; https://intel.ingress.com/intel?pll=${{lat}},${{lng}}`);
+    }}
+    return out;
+  }}
+
+  async function sendToMaxfield() {{
+    const zoom = window.map.getZoom();
+    if (zoom < MIN_ZOOM) {{
+      alert(`Aproxime mais o mapa (zoom mínimo ${{MIN_ZOOM}}).\\nZoom atual: ${{zoom}}`);
+      return;
+    }}
+
+    let lines = visiblePortals();
+    if (!lines.length) {{
+      alert("Nenhum portal visível nesta área.");
+      return;
+    }}
+    if (lines.length > MAX_PORTALS) {{
+      alert(`Foram encontrados ${{lines.length}} portais visíveis.\\nLimitando para ${{MAX_PORTALS}}.`);
+      lines = lines.slice(0, MAX_PORTALS);
+    }}
+
+    const text = lines.join('\\n');
+    const qs = "?list=" + encodeURIComponent(text);
+    const full = DEST + qs;
+
+    if (full.length > MAX_URL_LEN) {{
+      try {{
+        await navigator.clipboard.writeText(text);
+        alert(`URL muito grande. A lista foi copiada. Abra o Maxfield e cole (Ctrl+V).`);
+      }} catch (e) {{
+        alert("URL muito grande e não consegui copiar automaticamente. Copie manualmente.");
+        console.error(e);
+      }}
+      window.open(DEST, "_blank");
+    }} else {{
+      window.open(full, "_blank");
+    }}
+  }}
+
+  function addButton() {{
+    if (document.getElementById('btn-send-maxfield')) return;
+    const btn = document.createElement('a');
+    btn.id = 'btn-send-maxfield';
+    btn.textContent = 'Send to Maxfield';
+    btn.style.position = 'fixed';
+    btn.style.right = '10px';
+    btn.style.bottom = '10px';
+    btn.style.zIndex = 9999;
+    btn.style.padding = '6px 10px';
+    btn.style.background = '#2b8';
+    btn.style.color = '#fff';
+    btn.style.borderRadius = '4px';
+    btn.style.font = '12px/1.3 sans-serif';
+    btn.style.cursor = 'pointer';
+    btn.onclick = (e) => {{ e.preventDefault(); sendToMaxfield(); }};
+    document.body.appendChild(btn);
+  }}
+
+  const ready = () => addButton();
+  if (document.readyState === 'complete') ready();
+  else window.addEventListener('load', ready);
+}})();
+"""
+
+# ---------- Título + KPIs ----------
+st.title("Ingress Maxfield — Gerador de Planos")
+
+colv, colp = st.columns(2)
+with colv:
+    st.metric("Acessos (sessões)", f"{get_metric('visits'):,}")
+with colp:
+    st.metric("Planos gerados", f"{get_metric('plans_completed'):,}")
+
+# ---------- Ajuda + botões ----------
+st.markdown(
+    """
+- Envie o **arquivo .txt de portais** ou **cole o conteúdo** do arquivo de portais.  
+- Informe **nº de agentes** e **CPUs**.  
+- **Mapa de fundo (opcional)**: informe uma **Google Maps API key**. **Ou deixe em branco para usar a nossa**.  
+- Resultados: **imagens**, **CSVs** e (se permitido) **GIF** com o passo-a-passo.
+    """
+)
+
+b1, b2, b3, b4 = st.columns(4)
+with b1:
+    st.download_button("📄 Baixar modelo (.txt)", EXEMPLO_TXT.encode("utf-8"),
+                       file_name="modelo_portais.txt", mime="text/plain")
+with b2:
+    st.download_button("🧩 Baixar plugin IITC", IITC_USERSCRIPT.encode("utf-8"),
+                       file_name="maxfield_iitc.user.js", mime="application/javascript")
+with b3:
+    TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
+    st.link_button("▶️ Tutorial (normal)", TUTORIAL_URL)
+with b4:
+    TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
+    st.link_button("▶️ Tutorial (via IITC)", TUTORIAL_IITC_URL)
+
+# ---------- Pré-preencher via ?list= ----------
+def get_prefill_list() -> str:
+    try:
+        # compat: Streamlit 1.30+ (query_params) e mais antigo (experimental)
+        params = getattr(st, "query_params", None)
+        if params is not None:
+            return (params.get("list") or "")
+        else:
+            qp = st.experimental_get_query_params()
+            return qp.get("list", [""])[0]
+    except Exception:
+        return ""
+
+prefill_text = get_prefill_list()
+
+# ---------- UI principal ----------
 with st.form("plan_form"):
     uploaded = st.file_uploader("Arquivo de portais (.txt)", type=["txt"])
     txt_content = st.text_area(
         "Ou cole o conteúdo do arquivo de portais",
         height=200,
+        value=prefill_text or "",
         placeholder="Portal 1; https://www.ingress.com/intel?...pll=LAT,LON\nPortal 2; ..."
     )
 
@@ -204,19 +364,18 @@ with st.form("plan_form"):
 
     submitted = st.form_submit_button("Gerar plano")
 
-# Botões/links FORA do form (download em form dá erro)
-c1, c2 = st.columns(2)
-with c1:
-    st.download_button(
-        "📄 Baixar modelo (.txt)",
-        data=EXEMPLO_TXT.encode("utf-8"),
-        file_name="modelo_portais.txt",
-        mime="text/plain",
-        help="Baixe um modelo de como preparar o .txt de portais",
-    )
-with c2:
-    TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
-    st.link_button("▶️ Tutorial (YouTube)", TUTORIAL_URL)
+# ---------- Execução com ETA ----------
+def run_maxfield_worker(kwargs, out_dict):
+    t0 = time.time()
+    try:
+        res = processar_plano(**kwargs)
+        out_dict["ok"] = True
+        out_dict["result"] = res
+    except Exception as e:
+        out_dict["ok"] = False
+        out_dict["error"] = str(e)
+    finally:
+        out_dict["elapsed"] = time.time() - t0
 
 if submitted:
     if uploaded:
@@ -230,70 +389,112 @@ if submitted:
         portal_bytes = texto_portais.encode("utf-8")
 
     res_colors = team.startswith("Resistance")
-
     n_portais = contar_portais(texto_portais)
     fazer_gif = bool(gerar_gif_checkbox)
     if n_portais > 25 and fazer_gif:
-        st.warning(
-            f"Detectei **{n_portais} portais**. Para evitar travamentos, o GIF foi **desativado automaticamente**."
-        )
+        st.warning(f"Detectei **{n_portais} portais**. Para evitar travamentos, o GIF foi **desativado automaticamente**.")
         fazer_gif = False
 
     google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
     google_api_secret = (google_secret_input or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
 
-    st.info("Processando o plano... aguarde.")
-    try:
-        result = processar_plano(
-            portal_bytes=portal_bytes,
-            num_agents=int(num_agents),
-            num_cpus=int(num_cpus),
-            res_colors=res_colors,
-            google_api_key=google_api_key,
-            google_api_secret=google_api_secret,
-            output_csv=output_csv,
-            fazer_gif=fazer_gif,
-        )
-        st.success("Plano gerado com sucesso!")
+    kwargs = dict(
+        portal_bytes=portal_bytes,
+        num_agents=int(num_agents),
+        num_cpus=int(num_cpus),
+        res_colors=res_colors,
+        google_api_key=google_api_key,
+        google_api_secret=google_api_secret,
+        output_csv=output_csv,
+        fazer_gif=fazer_gif,
+    )
 
-        # incrementa métrica de planos gerados
+    eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
+    status = st.status("⏳ Iniciando...", expanded=True)
+    bar = st.progress(0)
+    eta_ph = st.empty()
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(run_maxfield_worker, kwargs, out)
+        t0 = time.time()
+        last_tick = 0
+        while not fut.done():
+            elapsed = time.time() - t0
+            pct = min(0.90, elapsed / max(1e-6, eta_s))
+            bar.progress(int(pct*100))
+            eta_left = max(0, eta_s - elapsed)
+            eta_ph.write(f"**Estimativa:** ~{int(eta_left)}s restantes · **Decorridos:** {int(elapsed)}s")
+            if int(elapsed) != last_tick:
+                status.update(label=f"⌛ Processando… ({int(elapsed)}s)")
+                last_tick = int(elapsed)
+            time.sleep(0.2)
+
+    bar.progress(100)
+    if out.get("ok"):
+        status.update(label="✅ Concluído", state="complete", expanded=False)
+        res = out["result"]
+
         inc_metric("plans_completed", 1)
+        record_run(n_portais, int(num_cpus), fazer_gif, out.get("elapsed", 0.0))
 
-        if result["pm_bytes"]:
-            st.image(result["pm_bytes"], caption="Portal Map")
-        if result["lm_bytes"]:
-            st.image(result["lm_bytes"], caption="Link Map")
-        if result["gif_bytes"]:
+        if res["pm_bytes"]:
+            st.image(res["pm_bytes"], caption="Portal Map")
+        if res["lm_bytes"]:
+            st.image(res["lm_bytes"], caption="Link Map")
+        if res["gif_bytes"]:
             st.download_button(
                 "Baixar GIF (plan_movie.gif)",
-                data=result["gif_bytes"],
+                data=res["gif_bytes"],
                 file_name="plan_movie.gif",
                 mime="image/gif"
             )
 
         st.download_button(
             "Baixar todos os arquivos (.zip)",
-            data=result["zip_bytes"],
+            data=res["zip_bytes"],
             file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
             mime="application/zip",
         )
 
         with st.expander("Ver logs do processamento"):
-            st.code(result["log_txt"] or "(sem logs)", language="bash")
+            st.code(res["log_txt"] or "(sem logs)", language="bash")
+    else:
+        status.update(label="❌ Falhou", state="error", expanded=True)
+        st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
 
-    except Exception as e:
-        st.error(f"Erro ao gerar o plano: {e}")
-
-# ---------- Rodapé com PIX e WhatsApp ----------
+# ---------- Rodapé: Doações (esq) + Informes (dir) ----------
 st.markdown("---")
-st.subheader("💙 Apoie este projeto")
+left, right = st.columns(2)
 
-pix_qr_url = st.secrets.get("PIX_QR_URL", "")
-if pix_qr_url:
-    st.image(pix_qr_url, caption="Use o QR Code para doar via PIX", width=200)
+# contatos atualizados
+PIX_PHONE_DISPLAY = "+55 79 99834-5186"
+WHATS_NUMBER_DIGITS = "5579998345186"  # para wa.me
+WHATS_URL = f"https://wa.me/{WHATS_NUMBER_DIGITS}"
+TELEGRAM_USER = st.secrets.get("TELEGRAM_USER", "@HiperionBR")
+TELEGRAM_URL = f"https://t.me/{TELEGRAM_USER.lstrip('@')}"
 
-st.markdown("Ou copie a chave PIX (celular): **+55 79 99816-0693**")
-st.markdown(
-    "[📲 Entrar em contato no WhatsApp](https://wa.me/5579998160693)",
-    unsafe_allow_html=True,
-)
+with left:
+    st.subheader("💙 Apoie este projeto")
+    pix_qr_url = st.secrets.get("PIX_QR_URL", "")
+    if pix_qr_url:
+        st.image(pix_qr_url, caption="Use o QR Code para doar via PIX", width=220)
+    st.markdown(f"Ou copie a chave PIX (celular): **{PIX_PHONE_DISPLAY}**")
+    st.markdown(f"[📲 Entrar em contato no WhatsApp]({WHATS_URL})", unsafe_allow_html=True)
+    st.markdown(f"[✈️ Falar no Telegram]({TELEGRAM_URL})", unsafe_allow_html=True)
+
+with right:
+    st.subheader("📰 Informes")
+    news_md = st.secrets.get("NEWS_MD", "").strip()
+    if news_md:
+        st.markdown(news_md)
+    else:
+        st.markdown(
+            """
+- Bem-vindo ao **Maxfield Online**!  
+- Você pode enviar portais via **arquivo**, **colar texto** ou pelo **plugin do IITC**.  
+- Feedbacks e ideias são muito bem-vindos.
+  
+> Dica: para editar este bloco sem atualizar o código, adicione `NEWS_MD = """Seu markdown aqui"""` em `.streamlit/secrets.toml`.
+            """
+        )
