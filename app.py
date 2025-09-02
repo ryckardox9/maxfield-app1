@@ -1,4 +1,3 @@
-# app.py
 import os
 import io
 import sys
@@ -58,7 +57,7 @@ def get_db():
     os.makedirs("data", exist_ok=True)
     db_path = os.path.join("data", "app.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    # métricas
+    # Tabela de métricas
     conn.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
             key   TEXT PRIMARY KEY,
@@ -67,14 +66,10 @@ def get_db():
     """)
     for k in ("visits", "plans_completed"):
         conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
-    # histórico das execuções (para ETA)
+    # Tabela de histórico de rodadas (para ETA)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS runs(
-            ts INTEGER,
-            n_portais INTEGER,
-            num_cpus INTEGER,
-            gif INTEGER,
-            dur_s REAL
+            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
         )
     """)
     conn.commit()
@@ -90,13 +85,10 @@ def get_metric(key: str) -> int:
     row = cur.fetchone()
     return int(row[0]) if row else 0
 
-# histórico de durações para melhorar ETA
 def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
     conn = get_db()
-    conn.execute(
-        "INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
-        (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)),
-    )
+    conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
+                 (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)))
     conn.commit()
 
 def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
@@ -106,22 +98,21 @@ def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
     cpu_factor = 1.0 / max(1.0, (0.6 + 0.5*min(num_cpus, 8)**0.5))
     est = (base_overhead + base_pp*n_portais) * cpu_factor
 
-    # refina com histórico recente
+    # refina com histórico recente (se houver)
     try:
-        cur = get_db().execute("""
-            SELECT dur_s, n_portais FROM runs
-            WHERE gif=? ORDER BY ts DESC LIMIT 50
-        """, (1 if gif else 0,))
+        cur = get_db().execute(
+            "SELECT dur_s, n_portais FROM runs WHERE gif=? ORDER BY ts DESC LIMIT 50",
+            (1 if gif else 0,),
+        )
         rows = cur.fetchall()
+        if rows:
+            pps = [r[0]/max(1, r[1]) for r in rows if r[1] > 0]
+            if pps:
+                pp_med = statistics.median(pps)
+                est = (pp_med * n_portais) * cpu_factor + (1.5 if not gif else 4.0)
     except sqlite3.OperationalError:
-        rows = []
-
-    if rows:
-        pps = [r[0]/max(1, r[1]) for r in rows if r[1] > 0]
-        if pps:
-            pp_med = statistics.median(pps)
-            est = (pp_med * n_portais) * cpu_factor + (1.5 if not gif else 4.0)
-
+        # se a tabela não existir por algum motivo, seguimos só com o chute
+        pass
     return max(2.0, est)
 
 # Conta visita 1x por sessão
@@ -334,7 +325,6 @@ with b4:
 # ---------- Pré-preencher via ?list= ----------
 def get_prefill_list() -> str:
     try:
-        # compat: Streamlit 1.30+ (query_params) e versões anteriores (experimental)
         params = getattr(st, "query_params", None)
         if params is not None:
             return (params.get("list") or "")
@@ -376,6 +366,33 @@ with st.form("plan_form"):
     gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=False)
 
     submitted = st.form_submit_button("Gerar plano")
+
+# container onde resultados serão sempre desenhados
+result_box = st.container()
+
+# ---------- Renderer de resultados (persiste após rerun) ----------
+def render_result(res: dict):
+    with result_box:
+        st.success("Plano gerado com sucesso!")
+        if res.get("pm_bytes"):
+            st.image(res["pm_bytes"], caption="Portal Map")
+        if res.get("lm_bytes"):
+            st.image(res["lm_bytes"], caption="Link Map")
+        if res.get("gif_bytes"):
+            st.download_button(
+                "Baixar GIF (plan_movie.gif)",
+                data=res["gif_bytes"],
+                file_name="plan_movie.gif",
+                mime="image/gif",
+            )
+        st.download_button(
+            "Baixar todos os arquivos (.zip)",
+            data=res["zip_bytes"],
+            file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            mime="application/zip",
+        )
+        with st.expander("Ver logs do processamento"):
+            st.code(res.get("log_txt") or "(sem logs)", language="bash")
 
 # ---------- Execução com ETA ----------
 def run_maxfield_worker(kwargs, out_dict):
@@ -423,7 +440,7 @@ if submitted:
     )
 
     eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-    status = st.status("⏳ Iniciando...", expanded=True)
+    status = st.status("⏳ Iniciando...", expanded=False)  # compacto para permitir rolagem
     bar = st.progress(0)
     eta_ph = st.empty()
 
@@ -451,30 +468,28 @@ if submitted:
         inc_metric("plans_completed", 1)
         record_run(n_portais, int(num_cpus), fazer_gif, out.get("elapsed", 0.0))
 
-        if res["pm_bytes"]:
-            st.image(res["pm_bytes"], caption="Portal Map")
-        if res["lm_bytes"]:
-            st.image(res["lm_bytes"], caption="Link Map")
-        if res["gif_bytes"]:
-            st.download_button(
-                "Baixar GIF (plan_movie.gif)",
-                data=res["gif_bytes"],
-                file_name="plan_movie.gif",
-                mime="image/gif"
-            )
-
-        st.download_button(
-            "Baixar todos os arquivos (.zip)",
-            data=res["zip_bytes"],
-            file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip",
-        )
-
-        with st.expander("Ver logs do processamento"):
-            st.code(res["log_txt"] or "(sem logs)", language="bash")
+        # guarda para persistir após reruns
+        st.session_state["last_result"] = res
+        st.session_state["last_meta"] = {
+            "n_portais": n_portais,
+            "num_cpus": int(num_cpus),
+            "gif": fazer_gif,
+            "elapsed": out.get("elapsed", 0.0),
+            "ts": int(time.time()),
+        }
+        render_result(res)
     else:
         status.update(label="❌ Falhou", state="error", expanded=True)
         st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
+
+# Reapresenta o último resultado se a página rerodar
+if "last_result" in st.session_state and not submitted:
+    with st.expander("Resultados da última geração", expanded=True):
+        render_result(st.session_state["last_result"])
+    if st.button("Limpar resultados"):
+        st.session_state.pop("last_result", None)
+        st.session_state.pop("last_meta", None)
+        st.experimental_rerun()
 
 # ---------- Rodapé: Doações (esq) + Informes (dir) ----------
 st.markdown("---")
@@ -503,13 +518,8 @@ with right:
         st.markdown(news_md)
     else:
         st.markdown(
-            """
-- Bem-vindo ao **Maxfield Online**!  
-- Você pode enviar portais via **arquivo**, **colar texto** ou pelo **plugin do IITC**.  
-- Feedbacks e ideias são muito bem-vindos.
-
-> Dica: para editar este bloco sem atualizar o código, adicione
-> `NEWS_MD = \"\"\"Seu markdown aqui\"\"\"`
-> em `.streamlit/secrets.toml`.
-            """
+            "- Bem-vindo ao **Maxfield Online**!\n"
+            "- Você pode enviar portais via **arquivo**, **colar texto** ou pelo **plugin do IITC**.\n"
+            "- Feedbacks e ideias são muito bem-vindos.\n\n"
+            "> Dica: para editar este bloco sem atualizar o código, adicione `NEWS_MD = \"Seu markdown aqui\"` em `.streamlit/secrets.toml`."
         )
