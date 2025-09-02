@@ -1,3 +1,4 @@
+# app.py
 import os
 import io
 import sys
@@ -6,7 +7,6 @@ import zipfile
 import tempfile
 import sqlite3
 import time
-import threading
 import statistics
 from datetime import datetime
 from contextlib import redirect_stdout
@@ -58,6 +58,7 @@ def get_db():
     os.makedirs("data", exist_ok=True)
     db_path = os.path.join("data", "app.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
+    # métricas
     conn.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
             key   TEXT PRIMARY KEY,
@@ -66,6 +67,16 @@ def get_db():
     """)
     for k in ("visits", "plans_completed"):
         conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
+    # histórico das execuções (para ETA)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs(
+            ts INTEGER,
+            n_portais INTEGER,
+            num_cpus INTEGER,
+            gif INTEGER,
+            dur_s REAL
+        )
+    """)
     conn.commit()
     return conn
 
@@ -82,13 +93,10 @@ def get_metric(key: str) -> int:
 # histórico de durações para melhorar ETA
 def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
     conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS runs(
-            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
-        )
-    """)
-    conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
-                 (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)))
+    conn.execute(
+        "INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
+        (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)),
+    )
     conn.commit()
 
 def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
@@ -99,16 +107,21 @@ def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
     est = (base_overhead + base_pp*n_portais) * cpu_factor
 
     # refina com histórico recente
-    cur = get_db().execute("""
-        SELECT dur_s, n_portais FROM runs
-        WHERE gif=? ORDER BY ts DESC LIMIT 50
-    """, (1 if gif else 0,))
-    rows = cur.fetchall()
+    try:
+        cur = get_db().execute("""
+            SELECT dur_s, n_portais FROM runs
+            WHERE gif=? ORDER BY ts DESC LIMIT 50
+        """, (1 if gif else 0,))
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+
     if rows:
         pps = [r[0]/max(1, r[1]) for r in rows if r[1] > 0]
         if pps:
             pp_med = statistics.median(pps)
             est = (pp_med * n_portais) * cpu_factor + (1.5 if not gif else 4.0)
+
     return max(2.0, est)
 
 # Conta visita 1x por sessão
@@ -321,7 +334,7 @@ with b4:
 # ---------- Pré-preencher via ?list= ----------
 def get_prefill_list() -> str:
     try:
-        # compat: Streamlit 1.30+ (query_params) e mais antigo (experimental)
+        # compat: Streamlit 1.30+ (query_params) e versões anteriores (experimental)
         params = getattr(st, "query_params", None)
         if params is not None:
             return (params.get("list") or "")
@@ -490,11 +503,13 @@ with right:
         st.markdown(news_md)
     else:
         st.markdown(
-            '''
+            """
 - Bem-vindo ao **Maxfield Online**!  
 - Você pode enviar portais via **arquivo**, **colar texto** ou pelo **plugin do IITC**.  
 - Feedbacks e ideias são muito bem-vindos.
-  
-> Dica: para editar este bloco sem atualizar o código, adicione `NEWS_MD = """Seu markdown aqui"""` em `.streamlit/secrets.toml`.
-            '''
+
+> Dica: para editar este bloco sem atualizar o código, adicione
+> `NEWS_MD = \"\"\"Seu markdown aqui\"\"\"`
+> em `.streamlit/secrets.toml`.
+            """
         )
