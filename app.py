@@ -383,7 +383,7 @@ with b1:
     st.download_button("📄 Baixar modelo (.txt)", EXEMPLO_TXT.encode("utf-8"),
                        file_name="modelo_portais.txt", mime="text/plain")
 with b2:
-    st.download_button("🧩 Baixar plugin IITC (mobile/desktop)", IITC_USERSCRIPT.encode("utf-8"),
+    st.download_button("🧩 Baixar plugin IITC", IITC_USERSCRIPT.encode("utf-8"),
                        file_name="maxfield_send_portals.user.js", mime="application/javascript")
 with b3:
     TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
