@@ -638,11 +638,11 @@ with right:
         st.markdown(news_md)
     else:
         st.markdown(
-            """
+            '''
 - Bem-vindo ao **Maxfield Online**!  
 - Você pode enviar portais via **arquivo**, **colar texto** ou pelo **plugin do IITC**.  
 - Feedbacks e ideias são muito bem-vindos.
   
 > Dica: para editar este bloco sem atualizar o código, adicione `NEWS_MD = """Seu markdown aqui"""` em `.streamlit/secrets.toml`.
-            """
+            '''
         )
