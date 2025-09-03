@@ -7,6 +7,7 @@ import tempfile
 import sqlite3
 import time
 import statistics
+import uuid
 from datetime import datetime
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
@@ -26,48 +27,44 @@ from maxfield.maxfield import maxfield as run_maxfield
 
 # ---------- Config do Streamlit ----------
 st.set_page_config(
-    page_title="Ingress Maxfield — Gerador de Planos",
+    page_title="Maxfield Online",
     page_icon="🗺️",
     layout="centered",
 )
 
-# ===== Fundo + cartão responsivo a claro/escuro =====
+# ===== Fundo + cartão responsivo (claro/escuro automático) =====
 bg_url = st.secrets.get("BG_URL", "").strip()
 st.markdown(
     f"""
     <style>
     .stApp {{
-        {"background: url('" + bg_url + "') no-repeat center center fixed; background-size: cover;" if bg_url else ""}
+      {"background: url('" + bg_url + "') no-repeat center center fixed; background-size: cover;" if bg_url else ""}
     }}
 
-    /* Cartão central – adapta ao modo (sem botão; automático) */
+    /* Cartão central adapta a preferência do SO (sem botão) */
     @media (prefers-color-scheme: light) {{
       .stApp .block-container {{
-          background: rgba(255,255,255,0.92);
-          color: #111;
+        background: rgba(255,255,255,0.92);
+        color: #111;
       }}
-      .stApp .block-container a {{
-          color: #005bbb;
-      }}
+      .stApp .block-container a {{ color: #005bbb; }}
     }}
     @media (prefers-color-scheme: dark) {{
       .stApp .block-container {{
-          background: rgba(20,20,20,0.75);
-          color: #eaeaea;
+        background: rgba(20,20,20,0.78);
+        color: #eaeaea;
       }}
-      .stApp .block-container a {{
-          color: #8ecaff;
-      }}
+      .stApp .block-container a {{ color: #8ecaff; }}
     }}
+
     .stApp .block-container {{
-        border-radius: 12px;
-        padding: 1rem 1.2rem 2rem 1.2rem;
+      border-radius: 12px;
+      padding: 1rem 1.2rem 2rem 1.2rem;
     }}
     </style>
     """,
     unsafe_allow_html=True
 )
-# ==================================================
 
 # ---------- Persistência simples (SQLite) ----------
 @st.cache_resource(show_spinner=False)
@@ -75,7 +72,6 @@ def get_db():
     os.makedirs("data", exist_ok=True)
     db_path = os.path.join("data", "app.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    # métricas
     conn.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
             key   TEXT PRIMARY KEY,
@@ -84,12 +80,6 @@ def get_db():
     """)
     for k in ("visits", "plans_completed"):
         conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
-    # histórico de execuções (para melhorar ETA)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS runs(
-            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
-        )
-    """)
     conn.commit()
     return conn
 
@@ -103,8 +93,14 @@ def get_metric(key: str) -> int:
     row = cur.fetchone()
     return int(row[0]) if row else 0
 
+# histórico de durações para melhorar ETA
 def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
     conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs(
+            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
+        )
+    """)
     conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
                  (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)))
     conn.commit()
@@ -208,11 +204,9 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- Userscripts IITC ----------
-DEST = "https://maxfield.fun/"
-
-# (Desktop) simples via GET ?list=...
-IITC_DESKTOP_USERSCRIPT = f"""// ==UserScript==
+# ---------- Userscript IITC (GET ?list=...) ----------
+DEST = "https://maxfield.fun/"  # domínio público do seu app
+IITC_USERSCRIPT = f"""// ==UserScript==
 // @name         Send portals to Maxfield (viewport-only + fallback)
 // @namespace    {DEST}
 // @version      0.3
@@ -305,121 +299,6 @@ IITC_DESKTOP_USERSCRIPT = f"""// ==UserScript==
 }})();
 """
 
-# (Mobile-safe) wrapper + abrir em navegador externo + mensagem orientativa
-IITC_MOBILE_USERSCRIPT = """// ==UserScript== 
-// @id             maxfield-send-portals@HiperionBR
-// @name           Maxfield — Send Portals (mobile-safe)
-// @category       Misc
-// @version        0.5.0
-// @description    Envia apenas os portais visíveis no IITC para maxfield.fun. No mobile, tenta abrir no navegador externo e copia o link.
-// @namespace      https://maxfield.fun/
-// @match          https://intel.ingress.com/*
-// @grant          none
-// ==/UserScript==
-
-function wrapper(plugin_info) {
-  if (typeof window.plugin !== 'function') window.plugin = function(){};
-  window.plugin.maxfieldSender = {};
-  const self = window.plugin.maxfieldSender;
-
-  self.MIN_ZOOM = 15;
-  self.MAX_PORTALS = 200;
-  self.MAX_URL_LEN = 6000;
-  self.DEST = 'https://maxfield.fun/';
-
-  self.openExternal = function(url){
-    try {
-      if (window.isApp && window.android) {
-        if (typeof android.openUrl === 'function')       { android.openUrl(url);       return; }
-        if (typeof android.openExternal === 'function')   { android.openExternal(url);  return; }
-        if (typeof android.openInBrowser === 'function')  { android.openInBrowser(url); return; }
-      }
-    } catch(e) {}
-    try { window.open(url, '_blank'); } catch(e) { location.href = url; }
-  };
-
-  self.visiblePortals = function(){
-    const bounds = window.map.getBounds();
-    const out = [];
-    for (const id in window.portals) {
-      const p = window.portals[id];
-      if (!p || !p.getLatLng) continue;
-      const ll = p.getLatLng();
-      if (!bounds.contains(ll)) continue;
-      const lat = ll.lat.toFixed(6);
-      const lng = ll.lng.toFixed(6);
-      const name = (p.options?.data?.title || 'Portal');
-      out.push(`${name}; https://intel.ingress.com/intel?pll=${lat},${lng}`);
-    }
-    return out;
-  };
-
-  self.send = async function(){
-    const zoom = window.map.getZoom();
-    if (zoom < self.MIN_ZOOM) { alert(`Aproxime mais o mapa (zoom mínimo ${self.MIN_ZOOM}).`); return; }
-
-    let lines = self.visiblePortals();
-    if (!lines.length) { alert('Nenhum portal visível nesta área.'); return; }
-    if (lines.length > self.MAX_PORTALS) {
-      alert(`Foram encontrados ${lines.length} portais visíveis.\\nLimitando para ${self.MAX_PORTALS}.`);
-      lines = lines.slice(0, self.MAX_PORTALS);
-    }
-
-    const text = lines.join('\\n');
-    const qs = '?list=' + encodeURIComponent(text);
-    const full = self.DEST + qs;
-
-    // Se ficar grande demais, copia a lista para colar no site
-    if (full.length > self.MAX_URL_LEN) {
-      try {
-        await navigator.clipboard.writeText(text);
-        alert('URL muito grande. A lista foi copiada. Abrirei o Maxfield; cole no campo de texto.');
-      } catch(e) {
-        alert('URL muito grande e não consegui copiar automaticamente. Copie manualmente.');
-      }
-      self.openExternal(self.DEST);
-      return;
-    }
-
-    // Copia o link e tenta abrir no navegador externo
-    try { await navigator.clipboard.writeText(full); } catch(e) {}
-    self.openExternal(full);
-
-    // Mensagem útil para o usuário mobile
-    setTimeout(() => {
-      alert('Se o Maxfield abrir dentro do IITC, abra seu navegador de internet e cole o link nele. O link já foi copiado automaticamente.');
-    }, 700);
-  };
-
-  self.addButton = function(){
-    if (document.getElementById('btn-send-maxfield')) return;
-    const btn = document.createElement('a');
-    btn.id = 'btn-send-maxfield';
-    btn.textContent = 'Send to Maxfield';
-    btn.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#2b8;color:#fff;border-radius:4px;font:12px/1.3 sans-serif;cursor:pointer';
-    btn.addEventListener('click', function(e){ e.preventDefault(); self.send(); });
-    (document.body || document.documentElement).appendChild(btn);
-  };
-
-  const setup = function(){ self.addButton(); };
-  setup.info = plugin_info;
-
-  if (!window.bootPlugins) window.bootPlugins = [];
-  window.bootPlugins.push(setup);
-
-  if (window.iitcLoaded) setup(); else window.addHook('iitcLoaded', setup);
-}
-
-// injeta no contexto da página
-const script = document.createElement('script');
-const info = {};
-if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
-  info.script = { version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description };
-}
-script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
-(document.body || document.head || document.documentElement).appendChild(script);
-"""
-
 # ---------- Título + KPIs ----------
 st.title("Ingress Maxfield — Gerador de Planos")
 
@@ -444,16 +323,14 @@ with b1:
     st.download_button("📄 Baixar modelo (.txt)", EXEMPLO_TXT.encode("utf-8"),
                        file_name="modelo_portais.txt", mime="text/plain")
 with b2:
-    st.download_button("🧩 IITC (desktop)", IITC_DESKTOP_USERSCRIPT.encode("utf-8"),
-                       file_name="maxfield_iitc_desktop.user.js", mime="application/javascript")
+    st.download_button("🧩 Baixar plugin IITC", IITC_USERSCRIPT.encode("utf-8"),
+                       file_name="maxfield_iitc.user.js", mime="application/javascript")
 with b3:
-    st.download_button("📱 IITC (mobile)", IITC_MOBILE_USERSCRIPT.encode("utf-8"),
-                       file_name="maxfield_iitc_mobile.user.js", mime="application/javascript")
-with b4:
     TUTORIAL_URL = st.secrets.get("TUTORIAL_URL", "https://www.youtube.com/")
-    TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
     st.link_button("▶️ Tutorial (normal)", TUTORIAL_URL)
-    st.link_button("▶️ Tutorial (IITC mobile)", TUTORIAL_IITC_URL)
+with b4:
+    TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
+    st.link_button("▶️ Tutorial (via IITC)", TUTORIAL_IITC_URL)
 
 # ---------- Pré-preencher via ?list= ----------
 def get_prefill_list() -> str:
@@ -500,44 +377,35 @@ with st.form("plan_form"):
 
     submitted = st.form_submit_button("Gerar plano")
 
-# ---------- Execução com ETA + persistência do resultado ----------
-def render_result(res_dict):
-    if not res_dict:
-        return
-    if res_dict.get("pm_bytes"):
-        st.image(res_dict["pm_bytes"], caption="Portal Map")
-    if res_dict.get("lm_bytes"):
-        st.image(res_dict["lm_bytes"], caption="Link Map")
-    if res_dict.get("gif_bytes"):
-        st.download_button(
-            "Baixar GIF (plan_movie.gif)",
-            data=res_dict["gif_bytes"],
-            file_name="plan_movie.gif",
-            mime="image/gif"
-        )
-    if res_dict.get("zip_bytes"):
-        st.download_button(
-            "Baixar todos os arquivos (.zip)",
-            data=res_dict["zip_bytes"],
-            file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip",
-        )
-    if res_dict.get("log_txt") is not None:
-        with st.expander("Ver logs do processamento"):
-            st.code(res_dict["log_txt"] or "(sem logs)", language="bash")
+# ---------- Execução com ETA (robusta a reconexão) ----------
 
-def run_maxfield_worker(kwargs, out_dict):
+@st.cache_resource(show_spinner=False)
+def job_manager():
+    """Executor + mapa de jobs vivos. Persiste entre reruns/reconexões."""
+    return {
+        "executor": ThreadPoolExecutor(max_workers=1),
+        "jobs": {}  # job_id -> {"future": Future, "t0": float, "eta": float, "meta": {...}}
+    }
+
+def run_job(kwargs: dict) -> dict:
     t0 = time.time()
     try:
         res = processar_plano(**kwargs)
-        out_dict["ok"] = True
-        out_dict["result"] = res
+        return {"ok": True, "result": res, "elapsed": time.time() - t0}
     except Exception as e:
-        out_dict["ok"] = False
-        out_dict["error"] = str(e)
-    finally:
-        out_dict["elapsed"] = time.time() - t0
+        return {"ok": False, "error": str(e), "elapsed": time.time() - t0}
 
+def start_job(kwargs: dict, eta_s: float, meta: dict) -> str:
+    jm = job_manager()
+    job_id = uuid.uuid4().hex[:8]
+    fut = jm["executor"].submit(run_job, kwargs)
+    jm["jobs"][job_id] = {"future": fut, "t0": time.time(), "eta": eta_s, "meta": meta}
+    return job_id
+
+def get_job(job_id: str):
+    return job_manager()["jobs"].get(job_id)
+
+# ===== Enfileirar job quando o usuário envia =====
 if submitted:
     if uploaded:
         portal_bytes = uploaded.getvalue()
@@ -571,45 +439,82 @@ if submitted:
     )
 
     eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-    status = st.status("⏳ Iniciando...", expanded=True)
-    bar = st.progress(0)
-    eta_ph = st.empty()
+    meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif}
 
-    out = {}
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(run_maxfield_worker, kwargs, out)
-        t0 = time.time()
-        last_tick = 0
-        while not fut.done():
-            elapsed = time.time() - t0
-            pct = min(0.90, elapsed / max(1e-6, eta_s))
-            bar.progress(int(pct*100))
-            eta_left = max(0, eta_s - elapsed)
-            eta_ph.write(f"**Estimativa:** ~{int(eta_left)}s restantes · **Decorridos:** {int(elapsed)}s")
-            if int(elapsed) != last_tick:
-                status.update(label=f"⌛ Processando… ({int(elapsed)}s)")
-                last_tick = int(elapsed)
-            time.sleep(0.2)
+    st.session_state["job_id"] = start_job(kwargs, eta_s, meta)
+    st.rerun()
 
-    bar.progress(100)
-    if out.get("ok"):
-        status.update(label="✅ Concluído", state="complete", expanded=False)
-        res = out["result"]
-
-        inc_metric("plans_completed", 1)
-        record_run(n_portais, int(num_cpus), fazer_gif, out.get("elapsed", 0.0))
-
-        # guarda resultado na sessão para não “sumir” em reruns
-        st.session_state["last_result"] = res
-
-        render_result(res)
+# ===== UI de acompanhamento do job (sobrevive a reconexões) =====
+job_id = st.session_state.get("job_id")
+if job_id:
+    job = get_job(job_id)
+    if not job:
+        st.warning("Não encontrei o job atual (talvez tenha concluído e sido limpo).")
     else:
-        status.update(label="❌ Falhou", state="error", expanded=True)
-        st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
+        fut = job["future"]
+        t0 = job["t0"]
+        eta_s = job["eta"]
+        meta = job.get("meta", {})
 
-# Se já existe um resultado anterior na sessão, exibe-o (útil após pequenos reruns)
-if not submitted and st.session_state.get("last_result"):
-    render_result(st.session_state.get("last_result"))
+        with st.status(f"⏳ Processando… (job {job_id})", expanded=True) as status:
+            bar = st.progress(0)
+            eta_ph = st.empty()
+
+            while not fut.done():
+                elapsed = time.time() - t0
+                pct = min(0.90, elapsed / max(1e-6, eta_s))
+                bar.progress(int(pct * 100))
+                eta_left = max(0, eta_s - elapsed)
+                eta_ph.write(f"**Estimativa:** ~{int(eta_left)}s restantes · **Decorridos:** {int(elapsed)}s")
+                time.sleep(0.3)
+
+        # terminou
+        out = fut.result()
+        bar.progress(100)
+
+        if out.get("ok"):
+            status.update(label="✅ Concluído", state="complete", expanded=False)
+            res = out["result"]
+
+            inc_metric("plans_completed", 1)
+            # grava histórico real para refinar ETAs futuros
+            try:
+                record_run(
+                    int(meta.get("n_portais", 0)),
+                    int(meta.get("num_cpus", 0)),
+                    bool(meta.get("gif", False)),
+                    float(out.get("elapsed", 0.0)),
+                )
+            except Exception:
+                pass
+
+            if res["pm_bytes"]:
+                st.image(res["pm_bytes"], caption="Portal Map")
+            if res["lm_bytes"]:
+                st.image(res["lm_bytes"], caption="Link Map")
+            if res["gif_bytes"]:
+                st.download_button(
+                    "Baixar GIF (plan_movie.gif)",
+                    data=res["gif_bytes"],
+                    file_name="plan_movie.gif",
+                    mime="image/gif"
+                )
+
+            st.download_button(
+                "Baixar todos os arquivos (.zip)",
+                data=res["zip_bytes"],
+                file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                mime="application/zip",
+            )
+
+            with st.expander("Ver logs do processamento"):
+                st.code(res["log_txt"] or "(sem logs)", language="bash")
+        else:
+            status.update(label="❌ Falhou", state="error", expanded=True)
+            st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
+
+        # limpa o job para não reaparecer no próximo refresh
+        del st.session_state["job_id"]
 
 # ---------- Rodapé: Doações (esq) + Informes (dir) ----------
 st.markdown("---")
