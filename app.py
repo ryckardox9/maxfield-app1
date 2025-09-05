@@ -8,7 +8,6 @@ import sqlite3
 import time
 import statistics
 import uuid
-import re
 from datetime import datetime
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
@@ -81,6 +80,11 @@ def get_db():
     """)
     for k in ("visits", "plans_completed"):
         conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs(
+            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
+        )
+    """)
     conn.commit()
     return conn
 
@@ -97,11 +101,6 @@ def get_metric(key: str) -> int:
 # histórico de durações para melhorar ETA
 def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
     conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS runs(
-            ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
-        )
-    """)
     conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
                  (int(time.time()), n_portais, num_cpus, 1 if gif else 0, float(dur_s)))
     conn.commit()
@@ -141,17 +140,14 @@ def contar_portais(texto: str) -> int:
         cnt += 1
     return cnt
 
-def sanitize_text(text: str) -> str:
-    """Remove caracteres invisíveis problemáticos, sem mexer nas quebras de linha."""
-    if not text:
-        return text
-    # normaliza quebras de linha \r\n / \r -> \n (não junta linhas)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # remove BOM/ZWSP/NBSP e parentes
-    text = text.replace("\ufeff", "")  # BOM
-    text = text.replace("\xa0", " ")   # NBSP -> espaço normal
-    text = re.sub(r"[\u200B-\u200F\u2060\uFEFF]", "", text)  # zero-width e afins
-    return text
+def clean_invisibles(s: str) -> str:
+    """
+    Remove caracteres invisíveis comuns (BOM, zero-width, NBSP etc) sem alterar quebras de linha.
+    """
+    bad = ["\ufeff", "\u200b", "\u200c", "\u200d", "\u2060", "\xa0"]
+    for ch in bad:
+        s = s.replace(ch, " " if ch == "\xa0" else "")
+    return s
 
 @st.cache_data(show_spinner=False)
 def processar_plano(portal_bytes: bytes,
@@ -191,6 +187,11 @@ def processar_plano(portal_bytes: bytes,
     finally:
         log_txt = log_buffer.getvalue()
 
+    # Salva o log como arquivo para entrar no ZIP
+    log_path = os.path.join(outdir, "maxfield_log.txt")
+    with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
+        lf.write(log_txt or "")
+
     def read_bytes(path):
         return open(path, "rb").read() if os.path.exists(path) else None
 
@@ -198,7 +199,6 @@ def processar_plano(portal_bytes: bytes,
     lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
     gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
 
-    # monta o zip e inclui também um arquivo de log
     zip_path = os.path.join(workdir, f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(outdir):
@@ -206,12 +206,9 @@ def processar_plano(portal_bytes: bytes,
                 fp = os.path.join(root, fn)
                 arc = os.path.relpath(fp, outdir)
                 z.write(fp, arcname=arc)
-        z.writestr("maxfield_log.txt", log_txt or "")
-
     zip_bytes = open(zip_path, "rb").read()
 
-    return {"zip_bytes": zip_bytes, "pm_bytes": pm_bytes, "lm_bytes": lm_bytes,
-            "gif_bytes": gif_bytes, "log_txt": log_txt}
+    return {"zip_bytes": zip_bytes, "pm_bytes": pm_bytes, "lm_bytes": lm_bytes, "gif_bytes": gif_bytes, "log_txt": log_txt}
 
 # ---------- Exemplo de entrada (.txt) ----------
 EXEMPLO_TXT = """# Exemplo de arquivo de portais (uma linha por portal)
@@ -313,7 +310,7 @@ IITC_USERSCRIPT = f"""// ==UserScript==
   const ready = () => addButton();
   if (document.readyState === 'complete') ready();
   else window.addEventListener('load', ready);
-}})();
+})();
 """
 
 # ---------- Título + KPIs ----------
@@ -363,23 +360,24 @@ def get_prefill_list() -> str:
 
 prefill_text = get_prefill_list()
 
-# -- estado para limpar entradas --
+# ---- sessão: chaves e limpeza adiada do campo de texto ----
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 if "txt_content" not in st.session_state:
     st.session_state["txt_content"] = prefill_text or ""
+if st.session_state.get("_clear_text", False):
+    st.session_state["_clear_text"] = False
+    st.session_state["txt_content"] = ""
 
 # ---------- UI principal ----------
 with st.form("plan_form"):
     uploaded = st.file_uploader(
-        "Arquivo de portais (.txt)",
-        type=["txt"],
+        "Arquivo de portais (.txt)", type=["txt"],
         key=f"uploader_{st.session_state['uploader_key']}"
     )
-    txt_area_val = st.text_area(
+    txt_content = st.text_area(
         "Ou cole o conteúdo do arquivo de portais",
         height=200,
-        value=st.session_state["txt_content"],
         key="txt_content",
         placeholder="Portal 1; https://www.ingress.com/intel?...pll=LAT,LON\nPortal 2; ..."
     )
@@ -433,46 +431,20 @@ def start_job(kwargs: dict, eta_s: float, meta: dict) -> str:
 def get_job(job_id: str):
     return job_manager()["jobs"].get(job_id)
 
-def show_results(res: dict):
-    if res.get("pm_bytes"):
-        st.image(res["pm_bytes"], caption="Portal Map")
-    if res.get("lm_bytes"):
-        st.image(res["lm_bytes"], caption="Link Map")
-    if res.get("gif_bytes"):
-        st.download_button(
-            "Baixar GIF (plan_movie.gif)",
-            data=res["gif_bytes"],
-            file_name="plan_movie.gif",
-            mime="image/gif"
-        )
-    st.download_button(
-        "Baixar todos os arquivos (.zip)",
-        data=res["zip_bytes"],
-        file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-        mime="application/zip",
-    )
-    with st.expander("Ver logs do processamento"):
-        st.code(res.get("log_txt") or "(sem logs)", language="bash")
-    if st.button("🧹 Limpar resultados"):
-        st.session_state.pop("last_result", None)
-        st.rerun()
-
 # ===== Enfileirar job quando o usuário envia =====
 if submitted:
     if uploaded:
         portal_bytes = uploaded.getvalue()
         texto_portais = portal_bytes.decode("utf-8", errors="ignore")
     else:
-        if not txt_area_val.strip():
+        if not st.session_state["txt_content"].strip():
             st.error("Envie um arquivo .txt ou cole o conteúdo.")
             st.stop()
-        texto_portais = txt_area_val
-        portal_bytes = None  # vamos gerar dos bytes depois
-
-    # sanitização (sem mexer nas quebras)
-    texto_portais = sanitize_text(texto_portais)
-    if portal_bytes is None:
+        texto_portais = st.session_state["txt_content"]
         portal_bytes = texto_portais.encode("utf-8")
+
+    # sanitiza caracteres invisíveis (não mexe em quebras de linha)
+    texto_portais = clean_invisibles(texto_portais)
 
     res_colors = team.startswith("Resistance")
     n_portais = contar_portais(texto_portais)
@@ -498,12 +470,12 @@ if submitted:
     eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
     meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif}
 
-    st.session_state["job_id"] = start_job(kwargs, eta_s, meta)
-
-    # limpa entradas para evitar reaproveitar sem querer
-    st.session_state["txt_content"] = ""
+    # limpar entrada DEPOIS: marca flag e reseta uploader
+    st.session_state["_clear_text"] = True
     st.session_state["uploader_key"] += 1
 
+    # inicia o job e redireciona para a área de acompanhamento
+    st.session_state["job_id"] = start_job(kwargs, eta_s, meta)
     st.rerun()
 
 # ===== UI de acompanhamento do job (sobrevive a reconexões) =====
@@ -538,6 +510,9 @@ if job_id:
             status.update(label="✅ Concluído", state="complete", expanded=False)
             res = out["result"]
 
+            # guarda para persistir na tela
+            st.session_state["last_result"] = res
+
             inc_metric("plans_completed", 1)
             # grava histórico real para refinar ETAs futuros
             try:
@@ -549,21 +524,41 @@ if job_id:
                 )
             except Exception:
                 pass
-
-            # persiste resultados até o usuário limpar
-            st.session_state["last_result"] = res
-            show_results(res)
         else:
             status.update(label="❌ Falhou", state="error", expanded=True)
             st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
-
-        # limpa o job para não reaparecer no próximo refresh
+        # limpa o job para não reaparecer
         del st.session_state["job_id"]
 
-# Se não há job ativo, mas existem resultados anteriores, mostra novamente
-elif st.session_state.get("last_result"):
+# ===== Render de resultados persistentes =====
+res = st.session_state.get("last_result")
+if res:
     st.success("Plano gerado com sucesso!")
-    show_results(st.session_state["last_result"])
+    if res.get("pm_bytes"):
+        st.image(res["pm_bytes"], caption="Portal Map")
+    if res.get("lm_bytes"):
+        st.image(res["lm_bytes"], caption="Link Map")
+    if res.get("gif_bytes"):
+        st.download_button(
+            "Baixar GIF (plan_movie.gif)",
+            data=res["gif_bytes"],
+            file_name="plan_movie.gif",
+            mime="image/gif"
+        )
+
+    st.download_button(
+        "Baixar todos os arquivos (.zip)",
+        data=res["zip_bytes"],
+        file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+        mime="application/zip",
+    )
+
+    with st.expander("Ver logs do processamento"):
+        st.code(res.get("log_txt") or "(sem logs)", language="bash")
+
+    if st.button("🧹 Limpar resultados"):
+        st.session_state.pop("last_result", None)
+        st.rerun()
 
 # ---------- Rodapé: Doações (esq) + Informes (dir) ----------
 st.markdown("---")
