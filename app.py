@@ -8,10 +8,7 @@ import sqlite3
 import time
 import statistics
 import uuid
-<<<<<<< HEAD
 import re
-=======
->>>>>>> 1f69a1a10d962f7ad7aa44b31c2acda96bdbb81b
 from datetime import datetime
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
@@ -436,7 +433,6 @@ def start_job(kwargs: dict, eta_s: float, meta: dict) -> str:
 def get_job(job_id: str):
     return job_manager()["jobs"].get(job_id)
 
-<<<<<<< HEAD
 def show_results(res: dict):
     if res.get("pm_bytes"):
         st.image(res["pm_bytes"], caption="Portal Map")
@@ -461,8 +457,6 @@ def show_results(res: dict):
         st.session_state.pop("last_result", None)
         st.rerun()
 
-=======
->>>>>>> 1f69a1a10d962f7ad7aa44b31c2acda96bdbb81b
 # ===== Enfileirar job quando o usuário envia =====
 if submitted:
     if uploaded:
@@ -505,7 +499,6 @@ if submitted:
     meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif}
 
     st.session_state["job_id"] = start_job(kwargs, eta_s, meta)
-<<<<<<< HEAD
 
     # limpa entradas para evitar reaproveitar sem querer
     st.session_state["txt_content"] = ""
@@ -560,89 +553,17 @@ if job_id:
             # persiste resultados até o usuário limpar
             st.session_state["last_result"] = res
             show_results(res)
-=======
-    st.rerun()
-
-# ===== UI de acompanhamento do job (sobrevive a reconexões) =====
-job_id = st.session_state.get("job_id")
-if job_id:
-    job = get_job(job_id)
-    if not job:
-        st.warning("Não encontrei o job atual (talvez tenha concluído e sido limpo).")
-    else:
-        fut = job["future"]
-        t0 = job["t0"]
-        eta_s = job["eta"]
-        meta = job.get("meta", {})
-
-        with st.status(f"⏳ Processando… (job {job_id})", expanded=True) as status:
-            bar = st.progress(0)
-            eta_ph = st.empty()
-
-            while not fut.done():
-                elapsed = time.time() - t0
-                pct = min(0.90, elapsed / max(1e-6, eta_s))
-                bar.progress(int(pct * 100))
-                eta_left = max(0, eta_s - elapsed)
-                eta_ph.write(f"**Estimativa:** ~{int(eta_left)}s restantes · **Decorridos:** {int(elapsed)}s")
-                time.sleep(0.3)
-
-        # terminou
-        out = fut.result()
-        bar.progress(100)
-
-        if out.get("ok"):
-            status.update(label="✅ Concluído", state="complete", expanded=False)
-            res = out["result"]
-
-            inc_metric("plans_completed", 1)
-            # grava histórico real para refinar ETAs futuros
-            try:
-                record_run(
-                    int(meta.get("n_portais", 0)),
-                    int(meta.get("num_cpus", 0)),
-                    bool(meta.get("gif", False)),
-                    float(out.get("elapsed", 0.0)),
-                )
-            except Exception:
-                pass
-
-            if res["pm_bytes"]:
-                st.image(res["pm_bytes"], caption="Portal Map")
-            if res["lm_bytes"]:
-                st.image(res["lm_bytes"], caption="Link Map")
-            if res["gif_bytes"]:
-                st.download_button(
-                    "Baixar GIF (plan_movie.gif)",
-                    data=res["gif_bytes"],
-                    file_name="plan_movie.gif",
-                    mime="image/gif"
-                )
-
-            st.download_button(
-                "Baixar todos os arquivos (.zip)",
-                data=res["zip_bytes"],
-                file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                mime="application/zip",
-            )
-
-            with st.expander("Ver logs do processamento"):
-                st.code(res["log_txt"] or "(sem logs)", language="bash")
->>>>>>> 1f69a1a10d962f7ad7aa44b31c2acda96bdbb81b
         else:
             status.update(label="❌ Falhou", state="error", expanded=True)
             st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
 
         # limpa o job para não reaparecer no próximo refresh
         del st.session_state["job_id"]
-<<<<<<< HEAD
 
 # Se não há job ativo, mas existem resultados anteriores, mostra novamente
 elif st.session_state.get("last_result"):
     st.success("Plano gerado com sucesso!")
     show_results(st.session_state["last_result"])
-=======
->>>>>>> 1f69a1a10d962f7ad7aa44b31c2acda96bdbb81b
 
 # ---------- Rodapé: Doações (esq) + Informes (dir) ----------
 st.markdown("---")
