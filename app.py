@@ -218,100 +218,180 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- Userscript IITC (GET ?list=...) ----------
+# ---------- Userscript IITC (mobile-safe + toolbox button) ----------
 DEST = "https://maxfield.fun/"  # domínio público do seu app
-IITC_USERSCRIPT = f"""// ==UserScript==
-// @name         Send portals to Maxfield (viewport-only + fallback)
-// @namespace    {DEST}
-// @version      0.3
-// @description  Envia apenas os portais visíveis no mapa do IITC para maxfield.fun; tem limite, zoom mínimo e fallback p/ clipboard.
-// @match        https://intel.ingress.com/*
-// @grant        none
+
+IITC_USERSCRIPT_TMPL = """// ==UserScript==
+// @id             maxfield-send-portals@HiperionBR
+// @name           Maxfield — Send Portals (mobile-safe + toolbox button)
+// @category       Misc
+// @version        0.6.0
+// @description    Envia os portais visíveis do IITC para maxfield.fun. Coloca botão no toolbox; no mobile copia o link e instrui abrir no navegador.
+// @namespace      https://maxfield.fun/
+// @match          https://intel.ingress.com/*
+// @grant          none
 // ==/UserScript==
 
-(function() {{
-  'use strict';
-  const MIN_ZOOM = 15;
-  const MAX_PORTALS = 200;
-  const MAX_URL_LEN = 6000;
-  const DEST = "{DEST}";
+function wrapper(plugin_info) {
+  if (typeof window.plugin !== 'function') window.plugin = function(){};
+  window.plugin.maxfieldSender = {};
+  const self = window.plugin.maxfieldSender;
 
-  function visiblePortals() {{
-    const bounds = window.map.getBounds();
+  // ===== Config =====
+  self.MIN_ZOOM    = 15;
+  self.MAX_PORTALS = 200;
+  self.MAX_URL_LEN = 6000;
+  self.DEST        = '__DEST__';
+  // ==================
+
+  const isMobile = /IITC|Android|Mobile/i.test(navigator.userAgent) || !!window.isApp;
+
+  self.openExternal = function(url){
+    try {
+      if (window.isApp && window.android) {
+        if (typeof android.openUrl === 'function')       { android.openUrl(url);       return; }
+        if (typeof android.openExternal === 'function')   { android.openExternal(url);  return; }
+        if (typeof android.openInBrowser === 'function')  { android.openInBrowser(url); return; }
+      }
+    } catch(e) {}
+    try { window.open(url, '_blank'); } catch(e) { location.href = url; }
+  };
+
+  self.visiblePortals = function(){
+    const map = window.map;
+    const bounds = map && map.getBounds ? map.getBounds() : null;
+    if (!bounds) return [];
     const out = [];
-    for (const id in window.portals) {{
+    for (const id in window.portals) {
       const p = window.portals[id];
       if (!p || !p.getLatLng) continue;
       const ll = p.getLatLng();
       if (!bounds.contains(ll)) continue;
-
       const lat = ll.lat.toFixed(6);
       const lng = ll.lng.toFixed(6);
       const name = (p.options?.data?.title || 'Portal');
-      out.push(`${{name}}; https://intel.ingress.com/intel?pll=${{lat}},${{lng}}`);
-    }}
+      out.push(`${name}; https://intel.ingress.com/intel?pll=${lat},${lng}`);
+      if (out.length >= self.MAX_PORTALS) break;
+    }
     return out;
-  }}
+  };
 
-  async function sendToMaxfield() {{
-    const zoom = window.map.getZoom();
-    if (zoom < MIN_ZOOM) {{
-      alert(`Aproxime mais o mapa (zoom mínimo ${{MIN_ZOOM}}).\\nZoom atual: ${{zoom}}`);
-      return;
-    }}
+  self.copy = async function(text){
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch(e) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch(_) { return false; }
+    }
+  };
 
-    let lines = visiblePortals();
-    if (!lines.length) {{
-      alert("Nenhum portal visível nesta área.");
+  self.send = async function(){
+    const map = window.map;
+    const zoom = map && map.getZoom ? map.getZoom() : 0;
+    if (zoom < self.MIN_ZOOM) {
+      alert(`Aproxime mais o mapa (zoom mínimo ${self.MIN_ZOOM}).`);
       return;
-    }}
-    if (lines.length > MAX_PORTALS) {{
-      alert(`Foram encontrados ${{lines.length}} portais visíveis.\\nLimitando para ${{MAX_PORTALS}}.`);
-      lines = lines.slice(0, MAX_PORTALS);
-    }}
+    }
+
+    let lines = self.visiblePortals();
+    if (!lines.length) { alert('Nenhum portal visível nesta área.'); return; }
+    if (lines.length > self.MAX_PORTALS) {
+      alert(`Foram encontrados ${lines.length} portais visíveis.\\nLimitando para ${self.MAX_PORTALS}.`);
+      lines = lines.slice(0, self.MAX_PORTALS);
+    }
 
     const text = lines.join('\\n');
-    const qs = "?list=" + encodeURIComponent(text);
-    const full = DEST + qs;
+    const full = self.DEST + '?list=' + encodeURIComponent(text);
 
-    if (full.length > MAX_URL_LEN) {{
-      try {{
-        await navigator.clipboard.writeText(text);
-        alert(`URL muito grande. A lista foi copiada. Abra o Maxfield e cole (Ctrl+V).`);
-      }} catch (e) {{
-        alert("URL muito grande e não consegui copiar automaticamente. Copie manualmente.");
-        console.error(e);
-      }}
-      window.open(DEST, "_blank");
-    }} else {{
-      window.open(full, "_blank");
-    }}
-  }}
+    // Se a URL ficar grande demais, abre o site e deixa a lista no clipboard
+    if (full.length > self.MAX_URL_LEN) {
+      await self.copy(text);
+      alert('URL muito grande. A lista foi copiada. Abrirei o Maxfield; cole no campo de texto.');
+      self.openExternal(self.DEST);
+      return;
+    }
 
-  function addButton() {{
-    if (document.getElementById('btn-send-maxfield')) return;
+    // Copia SEMPRE o link antes de abrir (melhor para mobile)
+    await self.copy(full);
+    self.openExternal(full);
+
+    // Mensagem solicitada (mobile)
+    if (isMobile) {
+      setTimeout(() => {
+        alert('Se o Maxfield abrir dentro do IITC, abra seu navegador de internet e cole o link nele. O link já foi copiado automaticamente.');
+      }, 600);
+    }
+  };
+
+  // --- Botão no TOOLBOX (igual aos do IITC) + fallback flutuante ---
+  self.addToolbarButton = function(){
+    if (document.getElementById('mf-send-btn-toolbar')) return true;
+    const toolbox = document.getElementById('toolbox');
+    if (!toolbox) return false;
+
+    const a = document.createElement('a');
+    a.id = 'mf-send-btn-toolbar';
+    a.className = 'button';
+    a.textContent = 'Send to Maxfield';
+    a.href = '#';
+    a.style.marginLeft = '6px';
+    a.addEventListener('click', function(e){ e.preventDefault(); self.send(); });
+    toolbox.appendChild(a);
+    return true;
+  };
+
+  self.addFloatingButton = function(){
+    if (document.getElementById('mf-send-btn-float')) return;
     const btn = document.createElement('a');
-    btn.id = 'btn-send-maxfield';
+    btn.id = 'mf-send-btn-float';
     btn.textContent = 'Send to Maxfield';
-    btn.style.position = 'fixed';
-    btn.style.right = '10px';
-    btn.style.bottom = '10px';
-    btn.style.zIndex = 9999;
-    btn.style.padding = '6px 10px';
-    btn.style.background = '#2b8';
-    btn.style.color = '#fff';
-    btn.style.borderRadius = '4px';
-    btn.style.font = '12px/1.3 sans-serif';
-    btn.style.cursor = 'pointer';
-    btn.onclick = (e) => {{ e.preventDefault(); sendToMaxfield(); }};
-    document.body.appendChild(btn);
-  }}
+    btn.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#2b8;color:#fff;border-radius:4px;font:12px/1.3 sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
+    btn.addEventListener('click', function(e){ e.preventDefault(); self.send(); });
+    (document.body || document.documentElement).appendChild(btn);
+  };
 
-  const ready = () => addButton();
-  if (document.readyState === 'complete') ready();
-  else window.addEventListener('load', ready);
-})();
+  self.mountButtonRobust = function(){
+    // tenta imediatamente
+    if (self.addToolbarButton()) return;
+
+    // espera o toolbox aparecer (até 10s)
+    const start = Date.now();
+    const intv = setInterval(() => {
+      if (self.addToolbarButton()) { clearInterval(intv); return; }
+      if (Date.now() - start > 10000) { clearInterval(intv); self.addFloatingButton(); }
+    }, 300);
+  };
+
+  const setup = function(){ self.mountButtonRobust(); };
+  setup.info = plugin_info;
+
+  if (!window.bootPlugins) window.bootPlugins = [];
+  window.bootPlugins.push(setup);
+
+  if (window.iitcLoaded) setup(); else window.addHook('iitcLoaded', setup);
+}
+
+// injeta no contexto da página (padrão IITC)
+const script = document.createElement('script');
+const info = {};
+if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
+  info.script = { version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description };
+}
+script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
+(document.body || document.head || document.documentElement).appendChild(script);
 """
+
+IITC_USERSCRIPT = IITC_USERSCRIPT_TMPL.replace("__DEST__", DEST)
 
 # ---------- Título + KPIs ----------
 st.title("Ingress Maxfield — Gerador de Planos")
