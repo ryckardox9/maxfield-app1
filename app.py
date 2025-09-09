@@ -268,9 +268,9 @@ IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @grant          none
 // ==/UserScript==
 
-function wrapper(plugin_info) {{
-  if (typeof window.plugin !== 'function') window.plugin = function(){{}};
-  window.plugin.maxfieldSender = {{}};
+function wrapper(plugin_info) {
+  if (typeof window.plugin !== 'function') window.plugin = function(){};
+  window.plugin.maxfieldSender = {};
   const self = window.plugin.maxfieldSender;
 
   // ===== Config =====
@@ -282,23 +282,23 @@ function wrapper(plugin_info) {{
 
   const isMobile = /IITC|Android|Mobile/i.test(navigator.userAgent) || !!window.isApp;
 
-  self.openExternal = function(url){{
-    try {{
-      if (window.isApp && window.android) {{
-        if (typeof android.openUrl === 'function')       {{ android.openUrl(url);       return; }}
-        if (typeof android.openExternal === 'function')   {{ android.openExternal(url);  return; }}
-        if (typeof android.openInBrowser === 'function')  {{ android.openInBrowser(url); return; }}
-      }}
-    }} catch(e) {{}}
-    try {{ window.open(url, '_blank'); }} catch(e) {{ location.href = url; }}
-  }};
+  self.openExternal = function(url){
+    try {
+      if (window.isApp && window.android) {
+        if (typeof android.openUrl === 'function')       { android.openUrl(url);       return; }
+        if (typeof android.openExternal === 'function')   { android.openExternal(url);  return; }
+        if (typeof android.openInBrowser === 'function')  { android.openInBrowser(url); return; }
+      }
+    } catch(e) {}
+    try { window.open(url, '_blank'); } catch(e) { location.href = url; }
+  };
 
-  self.visiblePortals = function(){{
+  self.visiblePortals = function(){
     const map = window.map;
     const bounds = map && map.getBounds ? map.getBounds() : null;
     if (!bounds) return [];
     const out = [];
-    for (const id in window.portals) {{
+    for (const id in window.portals) {
       const p = window.portals[id];
       if (!p || !p.getLatLng) continue;
       const ll = p.getLatLng();
@@ -306,18 +306,18 @@ function wrapper(plugin_info) {{
       const lat = ll.lat.toFixed(6);
       const lng = ll.lng.toFixed(6);
       const name = (p.options?.data?.title || 'Portal');
-      out.push(`${{name}}; https://intel.ingress.com/intel?pll=${{lat}},${{lng}}`);
+      out.push(`${name}; https://intel.ingress.com/intel?pll=${lat},${lng}`);
       if (out.length >= self.MAX_PORTALS) break;
-    }}
+    }
     return out;
-  }};
+  };
 
-  self.copy = async function(text){{
-    try {{
+  self.copy = async function(text){
+    try {
       await navigator.clipboard.writeText(text);
       return true;
-    }} catch(e) {{
-      try {{
+    } catch(e) {
+      try {
         const ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position = 'fixed';
@@ -327,50 +327,50 @@ function wrapper(plugin_info) {{
         const ok = document.execCommand('copy');
         document.body.removeChild(ta);
         return ok;
-      }} catch(_) {{ return false; }}
-    }}
-  }};
+      } catch(_) { return false; }
+    }
+  };
 
-  self.send = async function(){{
+  self.send = async function(){
     const map = window.map;
     const zoom = map && map.getZoom ? map.getZoom() : 0;
-    if (zoom < self.MIN_ZOOM) {{
-      alert(`Aproxime mais o mapa (zoom mínimo ${{self.MIN_ZOOM}}).`);
+    if (zoom < self.MIN_ZOOM) {
+      alert(`Aproxime mais o mapa (zoom mínimo ${self.MIN_ZOOM}).`);
       return;
-    }}
+    }
 
     let lines = self.visiblePortals();
-    if (!lines.length) {{ alert('Nenhum portal visível nesta área.'); return; }}
-    if (lines.length > self.MAX_PORTALS) {{
-      alert(`Foram encontrados ${{lines.length}} portais visíveis.\\nLimitando para ${{self.MAX_PORTALS}}.`);
+    if (!lines.length) { alert('Nenhum portal visível nesta área.'); return; }
+    if (lines.length > self.MAX_PORTALS) {
+      alert(`Foram encontrados ${lines.length} portais visíveis.\nLimitando para ${self.MAX_PORTALS}.`);
       lines = lines.slice(0, self.MAX_PORTALS);
-    }}
+    }
 
     const text = lines.join('\\n');
     const full = self.DEST + '?list=' + encodeURIComponent(text);
 
     // Se a URL ficar grande demais, abre o site e deixa a lista no clipboard
-    if (full.length > self.MAX_URL_LEN) {{
+    if (full.length > self.MAX_URL_LEN) {
       await self.copy(text);
       alert('URL muito grande. A lista foi copiada. Abrirei o Maxfield; cole no campo de texto.');
       self.openExternal(self.DEST);
       return;
-    }}
+    }
 
     // Copia SEMPRE o link antes de abrir (melhor para mobile)
     await self.copy(full);
     self.openExternal(full);
 
     // Mensagem solicitada (mobile)
-    if (isMobile) {{
-      setTimeout(() => {{
+    if (isMobile) {
+      setTimeout(() => {
         alert('Se o Maxfield abrir dentro do IITC, abra seu navegador de internet e cole o link nele. O link já foi copiado automaticamente.');
-      }}, 600);
-    }}
-  }};
+      }, 600);
+    }
+  };
 
   // --- Botão no TOOLBOX (igual aos do IITC) + fallback flutuante ---
-  self.addToolbarButton = function(){{
+  self.addToolbarButton = function(){
     if (document.getElementById('mf-send-btn-toolbar')) return true;
     const toolbox = document.getElementById('toolbox');
     if (!toolbox) return false;
@@ -381,45 +381,45 @@ function wrapper(plugin_info) {{
     a.textContent = 'Send to Maxfield';
     a.href = '#';
     a.style.marginLeft = '6px';
-    a.addEventListener('click', function(e){{ e.preventDefault(); self.send(); }});
+    a.addEventListener('click', function(e){ e.preventDefault(); self.send(); });
     toolbox.appendChild(a);
     return true;
-  }};
+  };
 
-  self.addFloatingButton = function(){{
+  self.addFloatingButton = function(){
     if (document.getElementById('mf-send-btn-float')) return;
     const btn = document.createElement('a');
     btn.id = 'mf-send-btn-float';
     btn.textContent = 'Send to Maxfield';
     btn.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#2b8;color:#fff;border-radius:4px;font:12px/1.3 sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
-    btn.addEventListener('click', function(e){{ e.preventDefault(); self.send(); }});
+    btn.addEventListener('click', function(e){ e.preventDefault(); self.send(); });
     (document.body || document.documentElement).appendChild(btn);
-  }};
+  };
 
-  self.mountButtonRobust = function(){{
+  self.mountButtonRobust = function(){
     if (self.addToolbarButton()) return;
     const start = Date.now();
-    const intv = setInterval(() => {{
-      if (self.addToolbarButton()) {{ clearInterval(intv); return; }}
-      if (Date.now() - start > 10000) {{ clearInterval(intv); self.addFloatingButton(); }}
-    }}, 300);
-  }};
+    const intv = setInterval(() => {
+      if (self.addToolbarButton()) { clearInterval(intv); return; }
+      if (Date.now() - start > 10000) { clearInterval(intv); self.addFloatingButton(); }
+    }, 300);
+  };
 
-  const setup = function(){{ self.mountButtonRobust(); }};
+  const setup = function(){ self.mountButtonRobust(); };
   setup.info = plugin_info;
 
   if (!window.bootPlugins) window.bootPlugins = [];
   window.bootPlugins.push(setup);
 
   if (window.iitcLoaded) setup(); else window.addHook('iitcLoaded', setup);
-}}
+}
 
 // injeta no contexto da página (padrão IITC)
 const script = document.createElement('script');
-const info = {{}};
-if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {{
-  info.script = {{ version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description }};
-}}
+const info = {};
+if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
+  info.script = { version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description };
+}
 script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
 (document.body || document.head || document.documentElement).appendChild(script);
 """
@@ -513,8 +513,12 @@ def get_job(job_id: str):
 # ---------- Restaura job por URL (sobrevive a refresh) ----------
 if "job_id" not in st.session_state:
     jid = qp_get("job", "")
-    if jid and get_job(jid):
-        st.session_state["job_id"] = jid
+    if jid:
+        if get_job(jid):
+            st.session_state["job_id"] = jid
+        else:
+            # ID órfão na URL, limpa
+            qp_set(job=None)
 
 # ---------- UI principal ----------
 with st.form("plan_form"):
@@ -544,7 +548,7 @@ with st.form("plan_form"):
         value="",
         help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente."
     )
-    google_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password")
+    google_api_secret = st.text_input("Google Maps API secret (opcional)", value="", type="password")
 
     gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=False)
 
@@ -573,7 +577,7 @@ if submitted:
         fazer_gif = False
 
     google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
-    google_api_secret = (google_secret_input or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
+    google_api_secret = (google_api_secret or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
 
     kwargs = dict(
         portal_bytes=portal_bytes,
@@ -594,8 +598,9 @@ if submitted:
     st.session_state["uploader_key"] += 1
 
     # inicia o job, fixa na URL e vai para acompanhamento
-    st.session_state["job_id"] = start_job(kwargs, eta_s, meta)
-    qp_set(job=st.session_state["job_id"])
+    new_id = start_job(kwargs, eta_s, meta)
+    st.session_state["job_id"] = new_id
+    qp_set(job=new_id)
     st.rerun()
 
 # ===== UI de acompanhamento do job (sobrevive a reconexões) =====
@@ -604,6 +609,7 @@ if job_id:
     job = get_job(job_id)
     if not job:
         st.warning("Não encontrei o job atual (talvez tenha concluído e sido limpo).")
+        qp_set(job=None)
     else:
         # Se o job já acabou (sessão nova), renderize imediatamente a saída armazenada
         if job.get("done") and job.get("out") is not None:
@@ -623,8 +629,9 @@ if job_id:
                     pass
             else:
                 st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
-            # limpar só o session_state (mantém registro até usuário limpar resultados)
+            # limpar apenas o session_state e a URL
             del st.session_state["job_id"]
+            qp_set(job=None)
         else:
             fut = job["future"]
             t0 = job["t0"]
@@ -672,8 +679,9 @@ if job_id:
                 status.update(label="❌ Falhou", state="error", expanded=True)
                 st.error(f"Erro ao gerar o plano: {out.get('error','desconhecido')}")
 
-            # limpa o job_id da sessão (resultado fica em last_result e registro global)
+            # limpa o job_id da sessão e o ?job da URL
             del st.session_state["job_id"]
+            qp_set(job=None)
 
 # ===== Render de resultados persistentes =====
 res = st.session_state.get("last_result")
