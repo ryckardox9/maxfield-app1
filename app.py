@@ -186,66 +186,106 @@ def qp_set(**kwargs):
     except Exception:
         pass
 
-@st.cache_data(show_spinner=False)
-def processar_plano(portal_bytes: bytes,
-                    num_agents: int,
-                    num_cpus: int,
-                    res_colors: bool,
-                    google_api_key: str | None,
-                    google_api_secret: str | None,
-                    output_csv: bool,
-                    fazer_gif: bool):
-    workdir = tempfile.mkdtemp(prefix="maxfield_")
-    outdir = os.path.join(workdir, "output")
-    os.makedirs(outdir, exist_ok=True)
-
-    portal_path = os.path.join(workdir, "portais.txt")
-    with open(portal_path, "wb") as f:
-        f.write(portal_bytes)
-
-    log_buffer = io.StringIO()
+# ---------- Entrada pré-preenchida por ?list= ----------
+def get_prefill_list() -> str:
     try:
-        with redirect_stdout(log_buffer):
-            run_maxfield(
-                portal_path,
-                num_agents=int(num_agents),
-                num_cpus=int(num_cpus),
-                res_colors=res_colors,
-                google_api_key=(google_api_key or None),
-                google_api_secret=(google_api_secret or None),
-                output_csv=output_csv,
-                outdir=outdir,
-                verbose=True,
-                skip_step_plots=(not fazer_gif),
-            )
+        params = getattr(st, "query_params", None)
+        if params is not None:
+            return (params.get("list") or "")
+        else:
+            qp = st.experimental_get_query_params()
+            return qp.get("list", [""])[0]
+    except Exception:
+        return ""
+
+prefill_text = get_prefill_list()
+
+# ---- sessão: chaves e limpeza adiada do campo de texto ----
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+if "txt_content" not in st.session_state:
+    st.session_state["txt_content"] = prefill_text or ""
+if st.session_state.get("_clear_text", False):
+    st.session_state["_clear_text"] = False
+    st.session_state["txt_content"] = ""
+
+# ---------- Job Manager compartilhado entre sessões ----------
+@st.cache_resource(show_spinner=False)
+def job_manager():
+    """Executor + registro global de jobs. Compartilhado entre sessões."""
+    return {
+        "executor": ThreadPoolExecutor(max_workers=1),
+        # job_id -> {"future": Future, "t0": float, "eta": float, "meta": {...},
+        #            "done": bool, "out": dict|None}
+        "jobs": {}
+    }
+
+def prune_jobs(max_jobs:int = 5, max_age_s:int = 3600):
+    """
+    Limpa jobs muito antigos, concluídos há muito tempo, ou excedentes.
+    - max_jobs: mantém no máximo N jobs mais recentes
+    - max_age_s: expira qualquer job com idade maior que esse valor
+    """
+    jm = job_manager()
+    now = time.time()
+    to_del = []
+
+    for jid, rec in list(jm["jobs"].items()):
+        age = now - float(rec.get("t0", now))
+        if age > max_age_s or (rec.get("done") and age > 300):
+            to_del.append(jid)
+
+    alive = [(jid, rec["t0"]) for jid, rec in jm["jobs"].items() if jid not in to_del]
+    if len(alive) > max_jobs:
+        alive.sort(key=lambda x: x[1])  # mais antigos primeiro
+        extras = [jid for jid, _ in alive[:-max_jobs]]
+        to_del.extend(extras)
+
+    for jid in to_del:
+        try:
+            fut = jm["jobs"][jid]["future"]
+            if fut and not fut.done():
+                fut.cancel()
+        except Exception:
+            pass
+        jm["jobs"].pop(jid, None)
+
+def run_job(kwargs: dict) -> dict:
+    t0 = time.time()
+    try:
+        res = processar_plano(**kwargs)
+        return {"ok": True, "result": res, "elapsed": time.time() - t0}
     except Exception as e:
-        log_buffer.write(f"\n[ERRO] {e}\n")
-        raise
-    finally:
-        log_txt = log_buffer.getvalue()
+        return {"ok": False, "error": str(e), "elapsed": time.time() - t0}
 
-    # Salva o log como arquivo para entrar no ZIP
-    log_path = os.path.join(outdir, "maxfield_log.txt")
-    with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
-        lf.write(log_txt or "")
+def start_job(kwargs: dict, eta_s: float, meta: dict) -> str:
+    prune_jobs()  # limpa jobs órfãos/antigos antes de enfileirar um novo
+    jm = job_manager()
+    job_id = uuid.uuid4().hex[:8]
+    fut = jm["executor"].submit(run_job, kwargs)
+    jm["jobs"][job_id] = {"future": fut, "t0": time.time(), "eta": eta_s, "meta": meta, "done": False, "out": None}
+    return job_id
 
-    def read_bytes(path):
-        return open(path, "rb").read() if os.path.exists(path) else None
+def get_job(job_id: str):
+    return job_manager()["jobs"].get(job_id)
 
-    pm_bytes = read_bytes(os.path.join(outdir, "portal_map.png"))
-    lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
-    gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
+# ---------- Restaura job por URL (sobrevive a refresh) ----------
+if "job_id" not in st.session_state:
+    jid = qp_get("job", "")
+    if jid:
+        if get_job(jid):
+            st.session_state["job_id"] = jid
+        else:
+            # ID órfão na URL, limpa
+            qp_set(job=None)
 
-    zip_path = os.path.join(workdir, f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for root, _, files in os.walk(outdir):
-            for fn in files:
-                fp = os.path.join(root, fn)
-                arc = os.path.relpath(fp, outdir)
-                z.write(fp, arcname=arc)
-    zip_bytes = open(zip_path, "rb").read()
+# ---------- Parâmetros públicos do userscript via secrets ----------
+PUBLIC_URL = (st.secrets.get("PUBLIC_URL", "https://maxfield.fun/").rstrip("/") + "/")
+MIN_ZOOM = int(st.secrets.get("MIN_ZOOM", 15))
+MAX_PORTALS = int(st.secrets.get("MAX_PORTALS", 200))
+MAX_URL_LEN = int(st.secrets.get("MAX_URL_LEN", 6000))
 
-    return {"zip_bytes": zip_bytes, "pm_bytes": pm_bytes, "lm_bytes": lm_bytes, "gif_bytes": gif_bytes, "log_txt": log_txt}
+DEST = PUBLIC_URL  # domínio público do app (usado na UI e no userscript)
 
 # ---------- Exemplo de entrada (.txt) ----------
 EXEMPLO_TXT = """# Exemplo de arquivo de portais (uma linha por portal)
@@ -256,12 +296,11 @@ Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
 # ---------- Userscript IITC (mobile-safe + toolbox) ----------
-DEST = "https://maxfield.fun/"  # domínio público do seu app
 IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @id             maxfield-send-portals@HiperionBR
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
 // @category       Misc
-// @version        0.6.0
+// @version        0.6.1
 // @description    Envia os portais visíveis do IITC para maxfield.fun. Coloca botão no toolbox; no mobile copia o link e instrui abrir no navegador.
 // @namespace      https://maxfield.fun/
 // @match          https://intel.ingress.com/*
@@ -335,14 +374,17 @@ function wrapper(plugin_info) {
     const map = window.map;
     const zoom = map && map.getZoom ? map.getZoom() : 0;
     if (zoom < self.MIN_ZOOM) {
-      alert(`Aproxime mais o mapa (zoom mínimo ${self.MIN_ZOOM}).`);
+      alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\\n\\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
       return;
     }
 
     let lines = self.visiblePortals();
-    if (!lines.length) { alert('Nenhum portal visível nesta área.'); return; }
+    if (!lines.length) {
+      alert('Nenhum portal visível nesta área.\\n\\nMova o mapa e/ou aumente o zoom até os marcadores aparecerem e tente novamente.');
+      return;
+    }
     if (lines.length > self.MAX_PORTALS) {
-      alert(`Foram encontrados ${lines.length} portais visíveis.\nLimitando para ${self.MAX_PORTALS}.`);
+      alert('Foram detectados ' + lines.length + ' portais visíveis.\\nPor estabilidade, enviaremos somente ' + self.MAX_PORTALS + '.\\n\\nDica: aproxime mais e envie em partes para capturar todos.');
       lines = lines.slice(0, self.MAX_PORTALS);
     }
 
@@ -352,7 +394,7 @@ function wrapper(plugin_info) {
     // Se a URL ficar grande demais, abre o site e deixa a lista no clipboard
     if (full.length > self.MAX_URL_LEN) {
       await self.copy(text);
-      alert('URL muito grande. A lista foi copiada. Abrirei o Maxfield; cole no campo de texto.');
+      alert('A URL ficou muito grande para abrir diretamente.\\n\\n✅ A LISTA DE PORTAIS FOI COPIADA para a área de transferência.\\n\\nComo proceder:\\n1) Abriremos o Maxfield agora.\\n2) No site, COLE a lista no campo de texto.\\n3) Clique em “Gerar plano”.\\n\\nDica: no mobile/IITC, se abrir dentro do app, escolha “abrir no navegador” (Chrome/Firefox).');
       self.openExternal(self.DEST);
       return;
     }
@@ -361,10 +403,10 @@ function wrapper(plugin_info) {
     await self.copy(full);
     self.openExternal(full);
 
-    // Mensagem solicitada (mobile)
+    // Mensagem pós-abertura (especialmente útil no mobile/IITC)
     if (isMobile) {
       setTimeout(() => {
-        alert('Se o Maxfield abrir dentro do IITC, abra seu navegador de internet e cole o link nele. O link já foi copiado automaticamente.');
+        alert('Abrimos o Maxfield em uma nova aba.\\n\\nSe ele abrir DENTRO do IITC, toque em “abrir no navegador” (Chrome/Firefox).\\nO link já foi copiado — se precisar, basta colar na barra de endereços.');
       }, 600);
     }
   };
@@ -423,7 +465,14 @@ if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
 script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
 (document.body || document.head || document.documentElement).appendChild(script);
 """
-IITC_USERSCRIPT = IITC_USERSCRIPT_TEMPLATE.replace("__DEST__", DEST)
+
+# aplica parâmetros vindos do secrets
+IITC_USERSCRIPT = (IITC_USERSCRIPT_TEMPLATE
+    .replace("__DEST__", DEST)
+    .replace("self.MIN_ZOOM    = 15;",   f"self.MIN_ZOOM    = {MIN_ZOOM};")
+    .replace("self.MAX_PORTALS = 200;",  f"self.MAX_PORTALS = {MAX_PORTALS};")
+    .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {MAX_URL_LEN};")
+)
 
 # ---------- Título + KPIs ----------
 st.title("Ingress Maxfield — Gerador de Planos")
@@ -440,7 +489,8 @@ st.markdown(
 - Envie o **arquivo .txt de portais** ou **cole o conteúdo** do arquivo de portais.  
 - Informe **nº de agentes** e **CPUs**.  
 - **Mapa de fundo (opcional)**: informe uma **Google Maps API key**. **Ou deixe em branco para usar a nossa**.  
-- Resultados: **imagens**, **CSVs** e (se permitido) **GIF** com o passo-a-passo.
+- Resultados: **imagens**, **CSVs** e (se permitido) **GIF** com o passo-a-passo.  
+- Dica: use **🔖 Salvar rascunho na URL** para preservar sua lista **antes** de gerar (seguro dar F5).
     """
 )
 
@@ -458,67 +508,86 @@ with b4:
     TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
     st.link_button("▶️ Tutorial (via IITC)", TUTORIAL_IITC_URL)
 
-# ---------- Pré-preencher via ?list= ----------
-def get_prefill_list() -> str:
+# ---------- Seção de Rascunho (fora do form) ----------
+st.markdown("### 📝 Rascunho")
+c1, c2 = st.columns(2)
+if c1.button("🔖 Salvar rascunho na URL"):
+    qp_set(list=st.session_state.get("txt_content", "") or "")
     try:
-        params = getattr(st, "query_params", None)
-        if params is not None:
-            return (params.get("list") or "")
-        else:
-            qp = st.experimental_get_query_params()
-            return qp.get("list", [""])[0]
+        st.toast("Rascunho salvo em ?list= (pode dar F5 com segurança).")
     except Exception:
-        return ""
+        pass
 
-prefill_text = get_prefill_list()
-
-# ---- sessão: chaves e limpeza adiada do campo de texto ----
-if "uploader_key" not in st.session_state:
-    st.session_state["uploader_key"] = 0
-if "txt_content" not in st.session_state:
-    st.session_state["txt_content"] = prefill_text or ""
-if st.session_state.get("_clear_text", False):
-    st.session_state["_clear_text"] = False
-    st.session_state["txt_content"] = ""
-
-# ---------- Job Manager compartilhado entre sessões ----------
-@st.cache_resource(show_spinner=False)
-def job_manager():
-    """Executor + registro global de jobs. Compartilhado entre sessões."""
-    return {
-        "executor": ThreadPoolExecutor(max_workers=1),
-        # job_id -> {"future": Future, "t0": float, "eta": float, "meta": {...},
-        #            "done": bool, "out": dict|None}
-        "jobs": {}
-    }
-
-def run_job(kwargs: dict) -> dict:
-    t0 = time.time()
+if c2.button("🧹 Limpar rascunho da URL"):
+    qp_set(list=None)
     try:
-        res = processar_plano(**kwargs)
-        return {"ok": True, "result": res, "elapsed": time.time() - t0}
+        st.toast("Rascunho removido da URL.")
+    except Exception:
+        pass
+
+# ---------- Processamento principal (cache com TTL) ----------
+@st.cache_data(show_spinner=False, ttl=3600)  # TTL 1h para evitar acumular bytes grandes no cache
+def processar_plano(portal_bytes: bytes,
+                    num_agents: int,
+                    num_cpus: int,
+                    res_colors: bool,
+                    google_api_key: str | None,
+                    google_api_secret: str | None,
+                    output_csv: bool,
+                    fazer_gif: bool):
+    workdir = tempfile.mkdtemp(prefix="maxfield_")
+    outdir = os.path.join(workdir, "output")
+    os.makedirs(outdir, exist_ok=True)
+
+    portal_path = os.path.join(workdir, "portais.txt")
+    with open(portal_path, "wb") as f:
+        f.write(portal_bytes)
+
+    log_buffer = io.StringIO()
+    try:
+        with redirect_stdout(log_buffer):
+            # Informação útil no log para diagnóstico
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · num_cpus={num_cpus} · gif={fazer_gif}")
+            run_maxfield(
+                portal_path,
+                num_agents=int(num_agents),
+                num_cpus=int(num_cpus),
+                res_colors=res_colors,
+                google_api_key=(google_api_key or None),
+                google_api_secret=(google_api_secret or None),
+                output_csv=output_csv,
+                outdir=outdir,
+                verbose=True,
+                skip_step_plots=(not fazer_gif),
+            )
     except Exception as e:
-        return {"ok": False, "error": str(e), "elapsed": time.time() - t0}
+        log_buffer.write(f"\n[ERRO] {e}\n")
+        raise
+    finally:
+        log_txt = log_buffer.getvalue()
 
-def start_job(kwargs: dict, eta_s: float, meta: dict) -> str:
-    jm = job_manager()
-    job_id = uuid.uuid4().hex[:8]
-    fut = jm["executor"].submit(run_job, kwargs)
-    jm["jobs"][job_id] = {"future": fut, "t0": time.time(), "eta": eta_s, "meta": meta, "done": False, "out": None}
-    return job_id
+    # Salva o log como arquivo para entrar no ZIP
+    log_path = os.path.join(outdir, "maxfield_log.txt")
+    with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
+        lf.write(log_txt or "")
 
-def get_job(job_id: str):
-    return job_manager()["jobs"].get(job_id)
+    def read_bytes(path):
+        return open(path, "rb").read() if os.path.exists(path) else None
 
-# ---------- Restaura job por URL (sobrevive a refresh) ----------
-if "job_id" not in st.session_state:
-    jid = qp_get("job", "")
-    if jid:
-        if get_job(jid):
-            st.session_state["job_id"] = jid
-        else:
-            # ID órfão na URL, limpa
-            qp_set(job=None)
+    pm_bytes = read_bytes(os.path.join(outdir, "portal_map.png"))
+    lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
+    gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
+
+    zip_path = os.path.join(workdir, f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(outdir):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                arc = os.path.relpath(fp, outdir)
+                z.write(fp, arcname=arc)
+    zip_bytes = open(zip_path, "rb").read()
+
+    return {"zip_bytes": zip_bytes, "pm_bytes": pm_bytes, "lm_bytes": lm_bytes, "gif_bytes": gif_bytes, "log_txt": log_txt}
 
 # ---------- UI principal ----------
 with st.form("plan_form"):
@@ -601,6 +670,13 @@ if submitted:
     new_id = start_job(kwargs, eta_s, meta)
     st.session_state["job_id"] = new_id
     qp_set(job=new_id)
+
+    # feedback imediato
+    try:
+        st.toast(f"Job {new_id} enfileirado: {n_portais} portais · ETA ~{int(eta_s)}s")
+    except Exception:
+        pass
+
     st.rerun()
 
 # ===== UI de acompanhamento do job (sobrevive a reconexões) =====
@@ -707,7 +783,14 @@ if res:
     )
 
     with st.expander("Ver logs do processamento"):
-        st.code(res.get("log_txt") or "(sem logs)", language="bash")
+        log_txt_full = res.get("log_txt") or "(sem logs)"
+        # Trunca para manter a UI leve
+        if len(log_txt_full) > 20000:
+            st.caption("Log truncado (últimos ~20k caracteres).")
+            log_txt = log_txt_full[-20000:]
+        else:
+            log_txt = log_txt_full
+        st.code(log_txt, language="bash")
 
     if st.button("🧹 Limpar resultados"):
         st.session_state.pop("last_result", None)
