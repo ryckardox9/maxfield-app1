@@ -115,37 +115,6 @@ def get_db():
             value TEXT
         )
     """)
-
-    # ------- Tabelas do FÓRUM -------
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          ts INTEGER,
-          title TEXT NOT NULL,
-          body_md TEXT NOT NULL,
-          images_json TEXT DEFAULT '[]'
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS comments (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          post_id INTEGER NOT NULL,
-          ts INTEGER,
-          uid TEXT,
-          author TEXT,
-          body TEXT,
-          FOREIGN KEY(post_id) REFERENCES posts(id) ON DELETE CASCADE
-        )
-    """)
-    # migração leve: coluna category
-    try:
-        conn.execute("SELECT category FROM posts LIMIT 1")
-    except Exception:
-        try:
-            conn.execute("ALTER TABLE posts ADD COLUMN category TEXT DEFAULT 'Atualizações'")
-        except Exception:
-            pass
-
     conn.commit()
     return conn
 
@@ -220,7 +189,7 @@ def daily_cleanup(retain_hours:int=24):
     if last == today:
         return  # já limpou hoje
 
-    # apaga dirs mais antigos (apenas data/jobs) — NÃO mexe no fórum
+    # apaga dirs mais antigos (somente data/jobs)
     root = os.path.join("data", "jobs")
     now = time.time()
     if os.path.isdir(root):
@@ -810,7 +779,7 @@ def processar_plano(portal_bytes: bytes,
     with open(os.path.join(outdir, "summary.md"), "w", encoding="utf-8") as f:
         f.write(summary_md)
 
-    # HTML muito simples (para imprimir em PDF no navegador)
+    # HTML simples
     summary_html = f"""<!doctype html><html lang="pt-br"><meta charset="utf-8">
 <title>Plano Maxfield — {job_id}</title>
 <style>body{{font-family:sans-serif;margin:24px}} img{{max-width:100%;height:auto}} h1{{margin-top:0}}</style>
@@ -837,7 +806,9 @@ def processar_plano(portal_bytes: bytes,
     }
 
 # ---------- UI Principal (tabs) ----------
-tab_gen, tab_hist, tab_metrics, tab_forum = st.tabs(["🧩 Gerar plano", "🕑 Histórico", "📊 Métricas", "🗣️ Fórum (debate e melhorias)"])
+tab_gen, tab_hist, tab_forum, tab_metrics = st.tabs(
+    ["🧩 Gerar plano", "🕑 Histórico", "💬 Fórum (debate e melhorias)", "📊 Métricas"]
+)
 
 with tab_gen:
     # Preview de cores da facção
@@ -946,7 +917,7 @@ with tab_gen:
         )
 
         eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team}
+        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team, "output_csv": output_csv}
 
         # limpar entrada DEPOIS
         st.session_state["_clear_text"] = True
@@ -1140,6 +1111,259 @@ with tab_hist:
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
 
+# ---------- FÓRUM ----------
+with tab_forum:
+    st.subheader("Fórum — debate e melhorias")
+
+    # ---- Configurações de permissão ----
+    enable_forum = bool(st.secrets.get("ENABLE_FORUM", True))
+    comments_enabled = bool(st.secrets.get("COMMENTS_ENABLED", True))
+    admin_pass_cfg = st.secrets.get("ADMIN_PASS", "mude-esta-senha")
+
+    if not enable_forum:
+        st.info("O fórum está desativado pelo administrador.")
+        st.stop()
+
+    # ---- Estado/admin ----
+    if "is_admin" not in st.session_state:
+        st.session_state["is_admin"] = False
+
+    with st.expander("⚙️ Área do admin", expanded=False):
+        admin_pass_try = st.text_input("Senha do admin", type="password", help="Definida em .streamlit/secrets.toml (ADMIN_PASS).")
+        colA1, colA2 = st.columns([1,3])
+        if colA1.button("Entrar como admin"):
+            st.session_state["is_admin"] = (admin_pass_try == admin_pass_cfg)
+            if st.session_state["is_admin"]:
+                st.toast("✅ Admin autenticado")
+            else:
+                st.toast("❌ Senha incorreta")
+        if st.session_state["is_admin"]:
+            colA2.success("Você está como admin.")
+
+    is_admin = st.session_state["is_admin"]
+
+    # ---- Categorias e regras ----
+    CATS = ["Atualizações", "Sugestões", "Críticas", "Dúvidas"]
+    ADMIN_ONLY = {"Atualizações"}   # somente admin cria tópico aqui
+    OPEN_CATS = set(CATS) - ADMIN_ONLY
+
+    # ---- Flash de sucesso após post ----
+    flash = st.session_state.pop("forum_flash", None)
+    if flash:
+        st.success(flash)
+
+    # ---- DB helpers ----
+    def forum_db():
+        conn = get_db()
+        # cria tabelas se não existirem
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS forum_posts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER,
+                cat TEXT,
+                uid TEXT,
+                title TEXT,
+                body TEXT,
+                images_json TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS forum_comments(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER,
+                post_id INTEGER,
+                uid TEXT,
+                body TEXT
+            )
+        """)
+        conn.commit()
+        return conn
+
+    conn = forum_db()
+
+    # ---- Form de novo tópico ----
+    st.markdown("### ✍️ Novo tópico")
+
+    # seleciona a categoria
+    cat = st.selectbox("Categoria", CATS, index=0)
+    can_post = (cat in OPEN_CATS) or (is_admin and cat in ADMIN_ONLY)
+
+    if not can_post:
+        st.info("Somente administradores podem iniciar tópicos em **Atualizações**.")
+        disabled_form = True
+    else:
+        disabled_form = False
+
+    # gerenciar key do uploader para limpar após submit
+    if "forum_uploader_key" not in st.session_state:
+        st.session_state["forum_uploader_key"] = 0
+
+    with st.form("forum_new_post", clear_on_submit=True):
+        title = st.text_input("Título", disabled=disabled_form)
+        body  = st.text_area("Conteúdo (markdown simples)", height=160, disabled=disabled_form)
+        imgs  = st.file_uploader(
+            "Imagens (opcional)", type=["png","jpg","jpeg","gif","webp"],
+            accept_multiple_files=True, disabled=disabled_form,
+            key=f"forum_uploader_{st.session_state['forum_uploader_key']}"
+        )
+        colp1, colp2 = st.columns([1,3])
+        post_btn = colp1.form_submit_button("Postar", disabled=disabled_form)
+
+    # Limites de mídia vindos do secrets (com defaults seguros)
+    MAX_IMG_MB = int(st.secrets.get("MAX_IMG_MB", 2))
+    MAX_IMGS_PER_POST = int(st.secrets.get("MAX_IMGS_PER_POST", 3))
+
+    if post_btn:
+        if not title.strip() or not body.strip():
+            st.warning("Informe título e conteúdo.")
+        else:
+            # aplica limites
+            imgs = imgs[:MAX_IMGS_PER_POST] if imgs else []
+            safe_imgs = []
+            too_big = []
+            for f in imgs:
+                size_mb = (len(f.getvalue()) / (1024*1024))
+                if size_mb <= MAX_IMG_MB:
+                    safe_imgs.append(f)
+                else:
+                    too_big.append(f.name)
+            if too_big:
+                st.warning(f"Estas imagens foram ignoradas por exceder {MAX_IMG_MB} MB: {', '.join(too_big)}")
+
+            # salva post
+            ts = int(time.time())
+            cur = conn.execute(
+                "INSERT INTO forum_posts(ts,cat,uid,title,body,images_json) VALUES (?,?,?,?,?,?)",
+                (ts, cat, st.session_state.get("uid","anon"), title.strip(), body.strip(), "[]")
+            )
+            post_id = cur.lastrowid
+            conn.commit()
+
+            # pasta de mídia
+            media_dir = os.path.join("data","forum", str(post_id))
+            os.makedirs(media_dir, exist_ok=True)
+            saved_names = []
+            for idx, f in enumerate(safe_imgs, start=1):
+                ext = os.path.splitext(f.name)[1].lower() or ".bin"
+                fn = f"img{idx}{ext}"
+                with open(os.path.join(media_dir, fn), "wb") as out:
+                    out.write(f.getvalue())
+                saved_names.append(fn)
+
+            # atualiza JSON de imagens
+            conn.execute("UPDATE forum_posts SET images_json=? WHERE id=?",
+                         (json.dumps(saved_names, ensure_ascii=False), post_id))
+            conn.commit()
+
+            # feedback + recarrega listando já o novo tópico
+            st.session_state["forum_flash"] = "Postagem publicada! ✅"
+            st.session_state["forum_uploader_key"] += 1
+            qp_set(post=str(post_id), cat=cat)
+            st.rerun()
+
+    # ---- Filtro por categoria (subabas) ----
+    st.markdown("### 📂 Tópicos por categoria")
+    sub = st.tabs([f"🛈 {c}" for c in CATS])
+    tab_map = dict(zip(CATS, sub))
+
+    def render_post_item(row):
+        pid, ts, cat, uid, title, body, images_json = row
+        dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        with st.container(border=True):
+            st.markdown(f"**{title}**  \n_{cat}_ · {dt}")
+            st.write(body)
+            # imagens
+            try:
+                names = json.loads(images_json or "[]")
+            except Exception:
+                names = []
+            if names:
+                cols = st.columns(min(3, len(names)))
+                for i, nm in enumerate(names):
+                    pth = os.path.join("data","forum", str(pid), nm)
+                    if os.path.exists(pth):
+                        with cols[i % len(cols)]:
+                            st.image(pth, use_column_width=True)
+            # comentários
+            if comments_enabled:
+                with st.expander("💬 Comentários"):
+                    # lista
+                    ccur = conn.execute(
+                        "SELECT id, ts, uid, body FROM forum_comments WHERE post_id=? ORDER BY ts ASC",
+                        (pid,)
+                    )
+                    comments = ccur.fetchall()
+                    if not comments:
+                        st.caption("Sem comentários ainda.")
+                    else:
+                        for (cid, cts, cuid, cbody) in comments:
+                            cdt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
+                            cols_c = st.columns([8,2])
+                            with cols_c[0]:
+                                st.markdown(f"**{cuid or 'anon'}** — _{cdt}_  \n{cbody}")
+                            with cols_c[1]:
+                                # botão excluir comentário (admin ou autor)
+                                can_del = is_admin or (cuid == st.session_state.get("uid","anon"))
+                                if can_del:
+                                    if st.button("🗑️ Excluir", key=f"delc_{pid}_{cid}"):
+                                        conn.execute("DELETE FROM forum_comments WHERE id=?", (cid,))
+                                        conn.commit()
+                                        st.toast("Comentário apagado.")
+                                        st.rerun()
+
+                    # novo comentário
+                    with st.form(f"add_comment_{pid}", clear_on_submit=True):
+                        ctext = st.text_input("Escreva um comentário…", placeholder="Seja respeitoso e objetivo.")
+                        sendc = st.form_submit_button("Comentar")
+                    if sendc and ctext.strip():
+                        conn.execute(
+                            "INSERT INTO forum_comments(ts,post_id,uid,body) VALUES (?,?,?,?)",
+                            (int(time.time()), pid, st.session_state.get("uid","anon"), ctext.strip())
+                        )
+                        conn.commit()
+                        st.toast("Comentário enviado.")
+                        st.rerun()
+
+            # (Opcional) Excluir post inteiro — somente admin
+            if is_admin:
+                if st.button("🗑️ Apagar tópico", key=f"delp_{pid}"):
+                    # remove comentários
+                    conn.execute("DELETE FROM forum_comments WHERE post_id=?", (pid,))
+                    conn.execute("DELETE FROM forum_posts WHERE id=?", (pid,))
+                    conn.commit()
+                    # remove mídia
+                    media_dir = os.path.join("data","forum", str(pid))
+                    if os.path.isdir(media_dir):
+                        for base, _, files in os.walk(media_dir, topdown=False):
+                            for fn in files:
+                                try: os.remove(os.path.join(base, fn))
+                                except: pass
+                            try: os.rmdir(base)
+                            except: pass
+                    st.toast("Tópico apagado.")
+                    st.rerun()
+
+    # ---- Listagem por categoria ----
+    for cat_name in CATS:
+        with tab_map[cat_name]:
+            cur = conn.execute(
+                "SELECT id, ts, cat, uid, title, body, images_json FROM forum_posts WHERE cat=? ORDER BY ts DESC",
+                (cat_name,)
+            )
+            posts = cur.fetchall()
+            if not posts:
+                st.info("Ainda sem tópicos nesta categoria.")
+            else:
+                highlight = qp_get("post","")
+                for row in posts:
+                    if highlight and str(row[0]) == str(highlight):
+                        st.markdown("🆕 **Sua postagem:**")
+                        render_post_item(row)
+                        st.markdown("---")
+                for row in posts:
+                    if not (highlight and str(row[0]) == str(highlight)):
+                        render_post_item(row)
+
 # ---------- MÉTRICAS ----------
 with tab_metrics:
     conn = get_db()
@@ -1157,146 +1381,6 @@ with tab_metrics:
         st.metric("Execuções (últimos 100)", f"{len(df)}")
         st.bar_chart(df[["dur_s"]].iloc[::-1], height=180)
         st.caption("Barras (da mais antiga para a mais recente) mostram a duração por execução.")
-
-# ---------- FÓRUM (debate e melhorias) ----------
-with tab_forum:
-    ENABLE_FORUM = bool(st.secrets.get("ENABLE_FORUM", True))
-    if not ENABLE_FORUM:
-        st.info("Seção de fórum desativada pelo admin.")
-    else:
-        conn = get_db()
-        uploads_root = os.path.join("data", "forum_uploads")
-        os.makedirs(uploads_root, exist_ok=True)
-
-        # Login admin simples
-        if "is_admin" not in st.session_state:
-            st.session_state["is_admin"] = False
-        with st.expander("🔐 Entrar como admin"):
-            pwd = st.text_input("Senha de admin", type="password")
-            if st.button("Entrar", key="forum_login"):
-                if pwd and pwd == st.secrets.get("ADMIN_PASS", ""):
-                    st.session_state["is_admin"] = True
-                    st.success("Admin ativo nesta sessão.")
-                else:
-                    st.error("Senha inválida.")
-        is_admin = st.session_state["is_admin"]
-
-        # Subtabs/Categorias
-        categories = ["Atualizações", "Sugestões", "Críticas"]
-        cat_tabs = st.tabs([f"📢 {categories[0]}", f"💡 {categories[1]}", f"🧨 {categories[2]}"])
-
-        for cat_tab, CAT in zip(cat_tabs, categories):
-            with cat_tab:
-                st.subheader(CAT)
-
-                # Criar post (somente admin)
-                if is_admin:
-                    st.markdown("**Criar novo post**")
-                    with st.form(f"new_post_{CAT}"):
-                        title = st.text_input("Título", key=f"title_{CAT}")
-                        body_md = st.text_area("Conteúdo (Markdown)", height=220, key=f"body_{CAT}")
-                        imgs = st.file_uploader("Imagens (opcional)", type=["png","jpg","jpeg","gif"], accept_multiple_files=True, key=f"imgs_{CAT}")
-                        posted = st.form_submit_button("Publicar")
-                    if posted:
-                        if not title.strip() or not body_md.strip():
-                            st.error("Título e conteúdo são obrigatórios.")
-                        else:
-                            now = int(time.time())
-                            cur = conn.execute("INSERT INTO posts(ts,title,body_md,images_json,category) VALUES (?,?,?,?,?)",
-                                               (now, title.strip(), body_md, "[]", CAT))
-                            post_id = cur.lastrowid
-                            conn.commit()
-
-                            saved_paths = []
-                            max_mb = int(st.secrets.get("MAX_IMG_MB", 2))
-                            max_imgs = int(st.secrets.get("MAX_IMGS_PER_POST", 3))
-                            up_dir = os.path.join(uploads_root, str(post_id))
-                            os.makedirs(up_dir, exist_ok=True)
-
-                            for i, f in enumerate(imgs[:max_imgs] if imgs else []):
-                                if f.size > max_mb*1024*1024:
-                                    st.warning(f"{f.name}: ignorada (>{max_mb}MB)")
-                                    continue
-                                ext = (os.path.splitext(f.name)[1] or ".png").lower()
-                                pth = os.path.join(up_dir, f"{i}{ext}")
-                                with open(pth, "wb") as out:
-                                    out.write(f.read())
-                                saved_paths.append(pth)
-
-                            conn.execute("UPDATE posts SET images_json=? WHERE id=?",
-                                         (json.dumps(saved_paths, ensure_ascii=False), post_id))
-                            conn.commit()
-                            st.success("Post publicado!")
-                            st.rerun()
-
-                st.markdown("---")
-
-                # Lista de posts da categoria
-                c = conn.execute("SELECT id, ts, title, body_md, images_json FROM posts WHERE category=? ORDER BY ts DESC LIMIT 100", (CAT,))
-                rows = c.fetchall()
-                if not rows:
-                    st.info("Sem posts ainda.")
-                else:
-                    COMMENTS_ENABLED = bool(st.secrets.get("COMMENTS_ENABLED", True))
-
-                    for pid, ts_post, title, body_md, images_json in rows:
-                        dt = datetime.fromtimestamp(ts_post).strftime("%Y-%m-%d %H:%M")
-                        with st.container(border=True):
-                            st.write(f"### {title}")
-                            st.caption(dt)
-                            st.markdown(body_md)
-
-                            # imagens
-                            try:
-                                paths = json.loads(images_json or "[]")
-                                for p in paths:
-                                    if os.path.exists(p):
-                                        st.image(open(p, "rb").read())
-                            except Exception:
-                                pass
-
-                            # ações admin
-                            if is_admin:
-                                cols = st.columns(3)
-                                with cols[0]:
-                                    if st.button("🗑 Apagar post", key=f"del_post_{pid}"):
-                                        conn.execute("DELETE FROM posts WHERE id=?", (pid,))
-                                        conn.execute("DELETE FROM comments WHERE post_id=?", (pid,))
-                                        conn.commit()
-                                        st.rerun()
-
-                            # comentários existentes
-                            st.markdown("##### Comentários")
-                            crows = conn.execute(
-                                "SELECT ts, author, body FROM comments WHERE post_id=? ORDER BY ts ASC", (pid,)
-                            ).fetchall()
-                            if crows:
-                                for cts, author, body in crows:
-                                    cdt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
-                                    st.write(f"**{author or 'Anônimo'}** — {cdt}")
-                                    st.write(body)
-                                    st.markdown("---")
-
-                            # novo comentário
-                            if COMMENTS_ENABLED:
-                                with st.form(f"cform_{pid}", clear_on_submit=True):
-                                    author = st.text_input("Seu nome (opcional)", key=f"author_{pid}")
-                                    cbody = st.text_area("Mensagem", key=f"body_{pid}", height=80, max_chars=2000)
-                                    send = st.form_submit_button("Comentar")
-                                if send:
-                                    last_ts_key = f"last_comment_{UID}"
-                                    now = int(time.time())
-                                    if now - int(st.session_state.get(last_ts_key, 0)) < 30:
-                                        st.warning("Aguarde alguns segundos antes de comentar novamente.")
-                                    elif not cbody.strip():
-                                        st.error("Escreva uma mensagem.")
-                                    else:
-                                        conn.execute("INSERT INTO comments(post_id, ts, uid, author, body) VALUES (?,?,?,?,?)",
-                                                     (pid, now, UID, (author.strip() or None), cbody.strip()))
-                                        conn.commit()
-                                        st.session_state[last_ts_key] = now
-                                        st.success("Comentário publicado!")
-                                        st.rerun()
 
 # ---------- Rodapé ----------
 st.markdown("---")
