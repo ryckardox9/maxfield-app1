@@ -122,8 +122,10 @@ def get_db():
         )
     """)
 
-    # --- Fórum + usuários + sessões ---
+    # --- NOVO: schema do fórum + usuários + sessões ---
+    # users
     conn.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT)")
+    # adiciona colunas se faltarem
     def colset(table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
     def ensure_col(table, col, decl):
@@ -144,6 +146,7 @@ def get_db():
         ("is_admin", "INTEGER DEFAULT 0"),
         ("created_ts", "INTEGER"),
         ("updated_ts", "INTEGER"),
+        # legados que já possam existir:
         ("uid", "TEXT"),
         ("name", "TEXT"),
         ("avatar_path", "TEXT"),
@@ -154,6 +157,7 @@ def get_db():
     except Exception:
         pass
 
+    # sessions
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions(
             token TEXT PRIMARY KEY,
@@ -164,6 +168,7 @@ def get_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
 
+    # forum tables
     conn.execute("CREATE TABLE IF NOT EXISTS forum_posts(id INTEGER PRIMARY KEY AUTOINCREMENT)")
     for col, decl in [
         ("cat", "TEXT"),
@@ -176,6 +181,7 @@ def get_db():
         ("updated_ts", "INTEGER"),
         ("images_json", "TEXT"),
         ("is_pinned", "INTEGER DEFAULT 0"),
+        # legados:
         ("ts", "INTEGER"),
         ("uid", "TEXT"),
         ("body", "TEXT"),
@@ -194,6 +200,7 @@ def get_db():
         ("body_md", "TEXT"),
         ("created_ts", "INTEGER"),
         ("deleted_ts", "INTEGER"),
+        # legados:
         ("ts", "INTEGER"),
         ("uid", "TEXT"),
         ("body", "TEXT"),
@@ -405,7 +412,7 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- Userscript IITC ----------
+# ---------- Userscript IITC (polido: contador + copiar txt) ----------
 IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @id             maxfield-send-portals@HiperionBR
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
@@ -636,6 +643,7 @@ st.markdown(
 - Informe **nº de agentes** e **CPUs**.  
 - **Mapa de fundo (opcional)**: informe uma **Google Maps API key**. **Ou deixe em branco para usar a nossa**.  
 - Resultados: **imagens**, **CSVs** e (se permitido) **GIF** com o passo-a-passo.  
+- Dica: você pode enviar a lista direto do IITC com o userscript abaixo.
     """
 )
 
@@ -845,6 +853,37 @@ def processar_plano(portal_bytes: bytes,
     lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
     gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
 
+    # --- Plano resumido (somente arquivo local, sem botões de download) ---
+    summary_md = []
+    summary_md.append(f"# Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    summary_md.append(f"- **Job**: `{job_id}`")
+    summary_md.append(f"- **Facção**: {'Resistance (azul)' if res_colors else 'Enlightened (verde)'}")
+    summary_md.append(f"- **Agentes**: {num_agents} · **CPUs**: {num_cpus} · **CSV**: {output_csv} · **GIF**: {fazer_gif}")
+    summary_md.append(f"- **Portais**: ver `portais.txt`")
+    if os.path.exists(os.path.join(outdir, "portal_map.png")):
+        summary_md.append(f"\n![Portal Map](portal_map.png)")
+    if os.path.exists(os.path.join(outdir, "link_map.png")):
+        summary_md.append(f"\n![Link Map](link_map.png)")
+    summary_md.append("\n---\nLogs completos: `maxfield_log.txt`")
+    summary_md = "\n".join(summary_md)
+    with open(os.path.join(outdir, "summary.md"), "w", encoding="utf-8") as f:
+        f.write(summary_md)
+
+    summary_html = f"""<!doctype html><html lang="pt-br"><meta charset="utf-8">
+<title>Plano Maxfield — {job_id}</title>
+<style>body{{font-family:sans-serif;margin:24px}} img{{max-width:100%;height:auto}} h1{{margin-top:0}}</style>
+<h1>Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}</h1>
+<p><b>Job:</b> {job_id}<br>
+<b>Facção:</b> {"Resistance (azul)" if res_colors else "Enlightened (verde)"}<br>
+<b>Agentes:</b> {num_agents} · <b>CPUs:</b> {num_cpus} · <b>CSV:</b> {output_csv} · <b>GIF:</b> {fazer_gif}</p>
+<p>Portais: ver <code>portais.txt</code></p>
+{"<h2>Portal Map</h2><img src='portal_map.png'>" if os.path.exists(os.path.join(outdir,"portal_map.png")) else ""}
+{"<h2>Link Map</h2><img src='link_map.png'>" if os.path.exists(os.path.join(outdir,"link_map.png")) else ""}
+<hr><p>Logs: <code>maxfield_log.txt</code></p>
+</html>"""
+    with open(os.path.join(outdir, "summary.html"), "w", encoding="utf-8") as f:
+        f.write(summary_html)
+
     zip_bytes = open(zip_path, "rb").read()
 
     return {
@@ -858,6 +897,7 @@ def processar_plano(portal_bytes: bytes,
     }
 
 # ---------- UI Principal (tabs) ----------
+# adiciona a aba Fórum se habilitada
 ENABLE_FORUM = bool(st.secrets.get("ENABLE_FORUM", True))
 tabs = ["🧩 Gerar plano", "🕑 Histórico", "📊 Métricas"]
 if ENABLE_FORUM:
@@ -928,8 +968,10 @@ with tab_gen:
             help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente.",
             key="g_key"
         )
+        # renomeado para evitar conflito com a var final
         google_api_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
 
+        # NOVO: sem mapa (ignora Google Maps nessa execução)
         sem_mapa = st.checkbox(
             "Sem mapa de fundo (mais rápido/robusto)",
             value=False,
@@ -955,17 +997,15 @@ with tab_gen:
         res_colors = team.startswith("Resistance")
         n_portais = contar_portais(texto_portais)
 
-        # Enforce Modo Rápido
-        fazer_gif = False if st.session_state.get("fast_mode", False) else bool(gerar_gif_checkbox)
-        output_csv = False if st.session_state.get("fast_mode", False) else bool(output_csv)
-
+        fazer_gif = (not st.session_state.get("fast_mode", False)) and bool(gerar_gif_checkbox)
         if n_portais > 25 and fazer_gif:
             st.warning(f"Detectei **{n_portais} portais**. Para evitar travamentos, o GIF foi **desativado automaticamente**.")
             fazer_gif = False
 
-        # aplica "Sem mapa de fundo" e também forçar sem mapa no Modo Rápido
-        force_no_map = st.session_state.get("fast_mode", False) or bool(sem_mapa)
-        if force_no_map:
+        output_csv = (not st.session_state.get("fast_mode", False)) and bool(output_csv)
+
+        # aplica "Sem mapa de fundo"
+        if sem_mapa:
             google_api_key = None
             google_api_secret = None
         else:
@@ -985,7 +1025,7 @@ with tab_gen:
         )
 
         eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team, "output_csv": output_csv}
+        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team}
 
         st.session_state["_clear_text"] = True
         st.session_state["uploader_key"] += 1
@@ -1125,7 +1165,8 @@ if res:
             "Baixar GIF (plan_movie.gif)",
             data=res["gif_bytes"],
             file_name="plan_movie.gif",
-            mime="image/gif"
+            mime="image/gif",
+            key="dl_gif_last",
         )
 
     st.download_button(
@@ -1133,6 +1174,7 @@ if res:
         data=res["zip_bytes"],
         file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
         mime="application/zip",
+        key="dl_zip_last",
     )
 
     with st.expander("Ver logs do processamento"):
@@ -1170,20 +1212,40 @@ with tab_hist:
                     cols = st.columns(4)
                     if os.path.exists(pm):
                         with cols[0]:
-                            st.download_button("Portal Map", data=open(pm,"rb").read(),
-                                               file_name="portal_map.png", mime="image/png")
+                            st.download_button(
+                                "Portal Map",
+                                data=open(pm,"rb").read(),
+                                file_name="portal_map.png",
+                                mime="image/png",
+                                key=f"dl_pm_{jid}",
+                            )
                     if os.path.exists(lm):
                         with cols[1]:
-                            st.download_button("Link Map", data=open(lm,"rb").read(),
-                                               file_name="link_map.png", mime="image/png")
+                            st.download_button(
+                                "Link Map",
+                                data=open(lm,"rb").read(),
+                                file_name="link_map.png",
+                                mime="image/png",
+                                key=f"dl_lm_{jid}",
+                            )
                     if os.path.exists(gif_p):
                         with cols[2]:
-                            st.download_button("GIF", data=open(gif_p,"rb").read(),
-                                               file_name="plan_movie.gif", mime="image/gif")
+                            st.download_button(
+                                "GIF",
+                                data=open(gif_p,"rb").read(),
+                                file_name="plan_movie.gif",
+                                mime="image/gif",
+                                key=f"dl_gif_{jid}",
+                            )
                     if zip_p and os.path.exists(zip_p):
                         with cols[3]:
-                            st.download_button("ZIP", data=open(zip_p,"rb").read(),
-                                               file_name=os.path.basename(zip_p), mime="application/zip")
+                            st.download_button(
+                                "ZIP",
+                                data=open(zip_p,"rb").read(),
+                                file_name=os.path.basename(zip_p),
+                                mime="application/zip",
+                                key=f"dl_zip_{jid}",
+                            )
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
 
