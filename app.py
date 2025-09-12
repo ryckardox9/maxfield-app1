@@ -122,10 +122,8 @@ def get_db():
         )
     """)
 
-    # --- NOVO: schema do fórum + usuários + sessões ---
-    # users
+    # --- Fórum + usuários + sessões ---
     conn.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT)")
-    # adiciona colunas se faltarem
     def colset(table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
     def ensure_col(table, col, decl):
@@ -146,7 +144,6 @@ def get_db():
         ("is_admin", "INTEGER DEFAULT 0"),
         ("created_ts", "INTEGER"),
         ("updated_ts", "INTEGER"),
-        # legados que já possam existir:
         ("uid", "TEXT"),
         ("name", "TEXT"),
         ("avatar_path", "TEXT"),
@@ -157,7 +154,6 @@ def get_db():
     except Exception:
         pass
 
-    # sessions
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions(
             token TEXT PRIMARY KEY,
@@ -168,7 +164,6 @@ def get_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
 
-    # forum tables
     conn.execute("CREATE TABLE IF NOT EXISTS forum_posts(id INTEGER PRIMARY KEY AUTOINCREMENT)")
     for col, decl in [
         ("cat", "TEXT"),
@@ -181,7 +176,6 @@ def get_db():
         ("updated_ts", "INTEGER"),
         ("images_json", "TEXT"),
         ("is_pinned", "INTEGER DEFAULT 0"),
-        # legados:
         ("ts", "INTEGER"),
         ("uid", "TEXT"),
         ("body", "TEXT"),
@@ -200,7 +194,6 @@ def get_db():
         ("body_md", "TEXT"),
         ("created_ts", "INTEGER"),
         ("deleted_ts", "INTEGER"),
-        # legados:
         ("ts", "INTEGER"),
         ("uid", "TEXT"),
         ("body", "TEXT"),
@@ -412,7 +405,7 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- Userscript IITC (polido: contador + copiar txt) ----------
+# ---------- Userscript IITC ----------
 IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @id             maxfield-send-portals@HiperionBR
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
@@ -643,7 +636,6 @@ st.markdown(
 - Informe **nº de agentes** e **CPUs**.  
 - **Mapa de fundo (opcional)**: informe uma **Google Maps API key**. **Ou deixe em branco para usar a nossa**.  
 - Resultados: **imagens**, **CSVs** e (se permitido) **GIF** com o passo-a-passo.  
-- Dica: use **🔖 Salvar rascunho na URL** para preservar sua lista **antes** de gerar (seguro dar F5).
     """
 )
 
@@ -660,18 +652,6 @@ with b3:
 with b4:
     TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
     st.link_button("▶️ Tutorial (via IITC)", TUTORIAL_IITC_URL)
-
-# ---------- Seção de Rascunho ----------
-st.markdown("### 📝 Rascunho")
-c1, c2 = st.columns(2)
-if c1.button("🔖 Salvar rascunho na URL"):
-    qp_set(list=st.session_state.get("txt_content", "") or "")
-    try: st.toast("Rascunho salvo em ?list= (pode dar F5 com segurança).")
-    except Exception: pass
-if c2.button("🧹 Limpar rascunho da URL"):
-    qp_set(list=None)
-    try: st.toast("Rascunho removido da URL.")
-    except Exception: pass
 
 # ---------- PWA Lite (manifest + SW via Blob) ----------
 st.markdown("""
@@ -785,7 +765,8 @@ if "job_id" not in st.session_state:
         else:
             qp_set(job=None)
 
-# ---------- Processamento principal (SEM cache; roda em thread) ----------
+# ---------- Processamento principal (cache com TTL) ----------
+@st.cache_data(show_spinner=False, ttl=3600)
 def processar_plano(portal_bytes: bytes,
                     num_agents: int,
                     num_cpus: int,
@@ -810,23 +791,15 @@ def processar_plano(portal_bytes: bytes,
     def t(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
     log_buffer = io.StringIO()
-
-    # Normalização de CPUs e “no map” forte (sem tocar em st.* na thread)
-    effective_cpus = int(num_cpus) if int(num_cpus) > 0 else (os.cpu_count() or 1)
-    no_map = (not google_api_key) and (not google_api_secret)
-    if no_map:
-        os.environ["MAXFIELD_NO_MAP"] = "1"  # permite ao maxfield/plots evitar qualquer tile/download
-
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · requested_cpus={num_cpus} "
-                  f"· effective_cpus={effective_cpus} · csv={output_csv} · gif={fazer_gif} · no_map={no_map}")
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · num_cpus={num_cpus} · gif={fazer_gif} · csv={output_csv}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
                 num_agents=int(num_agents),
-                num_cpus=effective_cpus,
+                num_cpus=int(num_cpus),
                 res_colors=res_colors,
                 google_api_key=(google_api_key or None),
                 google_api_secret=(google_api_secret or None),
@@ -872,37 +845,6 @@ def processar_plano(portal_bytes: bytes,
     lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
     gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
 
-    # --- Plano resumido ---
-    summary_md = []
-    summary_md.append(f"# Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    summary_md.append(f"- **Job**: `{job_id}`")
-    summary_md.append(f"- **Facção**: {'Resistance (azul)' if res_colors else 'Enlightened (verde)'}")
-    summary_md.append(f"- **Agentes**: {num_agents} · **CPUs**: {effective_cpus} · **CSV**: {output_csv} · **GIF**: {fazer_gif}")
-    summary_md.append(f"- **Portais**: ver `portais.txt`")
-    if os.path.exists(os.path.join(outdir, "portal_map.png")):
-        summary_md.append(f"\n![Portal Map](portal_map.png)")
-    if os.path.exists(os.path.join(outdir, "link_map.png")):
-        summary_md.append(f"\n![Link Map](link_map.png)")
-    summary_md.append("\n---\nLogs completos: `maxfield_log.txt`")
-    summary_md = "\n".join(summary_md)
-    with open(os.path.join(outdir, "summary.md"), "w", encoding="utf-8") as f:
-        f.write(summary_md)
-
-    summary_html = f"""<!doctype html><html lang="pt-br"><meta charset="utf-8">
-<title>Plano Maxfield — {job_id}</title>
-<style>body{{font-family:sans-serif;margin:24px}} img{{max-width:100%;height:auto}} h1{{margin-top:0}}</style>
-<h1>Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}</h1>
-<p><b>Job:</b> {job_id}<br>
-<b>Facção:</b> {"Resistance (azul)" if res_colors else "Enlightened (verde)"}<br>
-<b>Agentes:</b> {num_agents} · <b>CPUs:</b> {effective_cpus} · <b>CSV:</b> {output_csv} · <b>GIF:</b> {fazer_gif}</p>
-<p>Portais: ver <code>portais.txt</code></p>
-{"<h2>Portal Map</h2><img src='portal_map.png'>" if os.path.exists(os.path.join(outdir,"portal_map.png")) else ""}
-{"<h2>Link Map</h2><img src='link_map.png'>" if os.path.exists(os.path.join(outdir,"link_map.png")) else ""}
-<hr><p>Logs: <code>maxfield_log.txt</code></p>
-</html>"""
-    with open(os.path.join(outdir, "summary.html"), "w", encoding="utf-8") as f:
-        f.write(summary_html)
-
     zip_bytes = open(zip_path, "rb").read()
 
     return {
@@ -916,7 +858,6 @@ def processar_plano(portal_bytes: bytes,
     }
 
 # ---------- UI Principal (tabs) ----------
-# adiciona a aba Fórum se habilitada
 ENABLE_FORUM = bool(st.secrets.get("ENABLE_FORUM", True))
 tabs = ["🧩 Gerar plano", "🕑 Histórico", "📊 Métricas"]
 if ENABLE_FORUM:
@@ -974,24 +915,11 @@ with tab_gen:
             num_cpus = st.number_input("CPUs a usar (0 = máximo)", min_value=0, max_value=128, value=0, step=1, key="num_cpus")
 
         team = st.selectbox("Facção (cores)", ["Enlightened (verde)", "Resistance (azul)"], key="team_select")
-
-        # Defaults rígidos no Modo Rápido
         output_csv_default = False if st.session_state.get("fast_mode", False) else True
         gif_default = False
-
-        output_csv_checkbox = st.checkbox(
-            "Gerar CSV",
-            value=output_csv_default,
-            disabled=st.session_state.get("fast_mode", False),
-            key="out_csv"
-        )
+        output_csv = st.checkbox("Gerar CSV", value=output_csv_default, disabled=st.session_state.get("fast_mode", False), key="out_csv")
         st.caption("Dica: no celular o CSV é ruim de editar. No Modo Rápido ele fica desativado por padrão.")
-        gerar_gif_checkbox = st.checkbox(
-            "Gerar GIF (passo-a-passo)",
-            value=gif_default,
-            disabled=st.session_state.get("fast_mode", False),
-            key="out_gif"
-        )
+        gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=gif_default, disabled=st.session_state.get("fast_mode", False), key="out_gif")
 
         st.markdown("**Mapa de fundo (opcional):**")
         google_key_input = st.text_input(
@@ -1002,7 +930,6 @@ with tab_gen:
         )
         google_api_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
 
-        # “Sem mapa de fundo” manual (além do Modo Rápido)
         sem_mapa = st.checkbox(
             "Sem mapa de fundo (mais rápido/robusto)",
             value=False,
@@ -1028,16 +955,16 @@ with tab_gen:
         res_colors = team.startswith("Resistance")
         n_portais = contar_portais(texto_portais)
 
-        # Modo Rápido: força GIF/CSV off
+        # Enforce Modo Rápido
         fazer_gif = False if st.session_state.get("fast_mode", False) else bool(gerar_gif_checkbox)
+        output_csv = False if st.session_state.get("fast_mode", False) else bool(output_csv)
+
         if n_portais > 25 and fazer_gif:
             st.warning(f"Detectei **{n_portais} portais**. Para evitar travamentos, o GIF foi **desativado automaticamente**.")
             fazer_gif = False
 
-        output_csv = False if st.session_state.get("fast_mode", False) else bool(output_csv_checkbox)
-
-        # Força “sem mapa” se Modo Rápido estiver ligado OU se a opção manual estiver marcada
-        force_no_map = bool(st.session_state.get("fast_mode", False)) or bool(sem_mapa)
+        # aplica "Sem mapa de fundo" e também forçar sem mapa no Modo Rápido
+        force_no_map = st.session_state.get("fast_mode", False) or bool(sem_mapa)
         if force_no_map:
             google_api_key = None
             google_api_secret = None
@@ -1207,17 +1134,6 @@ if res:
         file_name=f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
         mime="application/zip",
     )
-
-    outdir = res.get("outdir")
-    if outdir and os.path.isdir(outdir):
-        md_path = os.path.join(outdir, "summary.md")
-        html_path = os.path.join(outdir, "summary.html")
-        if os.path.exists(md_path):
-            st.download_button("📝 Baixar plano resumido (.md)", data=open(md_path,"rb").read(),
-                               file_name="summary.md", mime="text/markdown")
-        if os.path.exists(html_path):
-            st.download_button("🖨️ Baixar para impressão (.html)", data=open(html_path,"rb").read(),
-                               file_name="summary.html", mime="text/html")
 
     with st.expander("Ver logs do processamento"):
         log_txt_full = res.get("log_txt") or "(sem logs)"
