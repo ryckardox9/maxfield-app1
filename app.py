@@ -10,7 +10,6 @@ import statistics
 import uuid
 import json
 import hashlib
-import hmac
 from datetime import datetime, timedelta
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
@@ -72,8 +71,9 @@ st.markdown(
     .mf-chip.enl {{ background:#25c025; }}
     .mf-chip.res {{ background:#2b6dff; }}
 
+    /* Avatar pequeno */
     .mf-avatar {{
-      width:28px;height:28px;border-radius:999px;object-fit:cover;vertical-align:middle;margin-right:6px;border:1px solid rgba(0,0,0,.2)
+      width:28px;height:28px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:6px;border:1px solid rgba(0,0,0,.15)
     }}
     </style>
     """,
@@ -86,6 +86,7 @@ def get_db():
     os.makedirs("data", exist_ok=True)
     db_path = os.path.join("data", "app.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
+    # métricas
     conn.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
             key   TEXT PRIMARY KEY,
@@ -94,13 +95,13 @@ def get_db():
     """)
     for k in ("visits", "plans_completed"):
         conn.execute("INSERT OR IGNORE INTO metrics(key, value) VALUES (?, 0)", (k,))
+    # runs para ETA
     conn.execute("""
         CREATE TABLE IF NOT EXISTS runs(
             ts INTEGER, n_portais INTEGER, num_cpus INTEGER, gif INTEGER, dur_s REAL
         )
     """)
-
-    # --- jobs (histórico/permalink) ---
+    # jobs (histórico/permalink 24h)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs(
             job_id TEXT PRIMARY KEY,
@@ -115,70 +116,57 @@ def get_db():
             out_dir TEXT
         )
     """)
-
-    # --- housekeeping diário ---
+    # housekeeping diário
     conn.execute("""
         CREATE TABLE IF NOT EXISTS housekeeping(
             key TEXT PRIMARY KEY,
             value TEXT
         )
     """)
-
-    # --- FÓRUM / USUÁRIOS / AUTH ---
+    # ===== NOVO: usuários / sessões / fórum =====
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT,           -- UID anônimo (query param) para amarrar sessão
-            name TEXT UNIQUE,   -- nome público único
-            faction TEXT,       -- 'ENL' ou 'RES'
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE,
+            username_lc TEXT UNIQUE,
+            pass_hash TEXT,
+            faction TEXT,
             email TEXT,
-            pass_salt BLOB,
-            pass_hash BLOB,
-            avatar_path TEXT,
             is_admin INTEGER DEFAULT 0,
+            avatar_path TEXT,
             created_ts INTEGER
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS auth_tokens(
+        CREATE TABLE IF NOT EXISTS sessions(
             token TEXT PRIMARY KEY,
-            user_id INTEGER,
-            expires_ts INTEGER,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+            user_id TEXT,
+            created_ts INTEGER,
+            last_seen_ts INTEGER
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS forum_posts(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cat TEXT,           -- 'updates'|'suggestions'|'critics'|'doubts'
+            id TEXT PRIMARY KEY,
+            ts INTEGER,
+            author_id TEXT,
+            author_name TEXT,
+            category TEXT,   -- 'Atualizações', 'Sugestões', 'Críticas', 'Dúvidas'
             title TEXT,
             body TEXT,
-            author_id INTEGER,
-            created_ts INTEGER,
-            FOREIGN KEY(author_id) REFERENCES users(id)
+            images_json TEXT
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS forum_comments(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER,
-            body TEXT,
-            author_id INTEGER,
-            created_ts INTEGER,
-            FOREIGN KEY(post_id) REFERENCES forum_posts(id),
-            FOREIGN KEY(author_id) REFERENCES users(id)
+            id TEXT PRIMARY KEY,
+            ts INTEGER,
+            post_id TEXT,
+            author_id TEXT,
+            author_name TEXT,
+            body TEXT
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS forum_attachments(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER,
-            path TEXT,
-            mime TEXT,
-            FOREIGN KEY(post_id) REFERENCES forum_posts(id)
-        )
-    """)
-
     conn.commit()
     return conn
 
@@ -253,7 +241,7 @@ def daily_cleanup(retain_hours:int=24):
     if last == today:
         return  # já limpou hoje
 
-    # apaga dirs mais antigos
+    # apaga dirs mais antigos de jobs
     root = os.path.join("data", "jobs")
     now = time.time()
     if os.path.isdir(root):
@@ -357,7 +345,7 @@ def qp_set(**kwargs):
     except Exception:
         pass
 
-# ---------- Identificador de usuário anônimo ----------
+# ---------- Identificador de usuário anônimo para histórico de planos ----------
 if "uid" not in st.session_state:
     cur_uid = qp_get("uid", "")
     if not cur_uid:
@@ -371,7 +359,6 @@ PUBLIC_URL = (st.secrets.get("PUBLIC_URL", "https://maxfield.fun/").rstrip("/") 
 MIN_ZOOM = int(st.secrets.get("MIN_ZOOM", 15))
 MAX_PORTALS = int(st.secrets.get("MAX_PORTALS", 200))
 MAX_URL_LEN = int(st.secrets.get("MAX_URL_LEN", 6000))
-ADMIN_CODE = st.secrets.get("ADMIN_CODE", "")  # para promover admin no perfil
 
 DEST = PUBLIC_URL
 
@@ -458,7 +445,7 @@ function wrapper(plugin_info) {
     }
   };
 
-  function selfupdateCounter(n){
+  selfupdateCounter = function(n){
     let el = document.getElementById('mf-portals-counter');
     if (!el) {
       el = document.createElement('div');
@@ -467,7 +454,7 @@ function wrapper(plugin_info) {
       (document.body || document.documentElement).appendChild(el);
     }
     el.textContent = 'Portais visíveis: ' + n + (n>=self.MAX_PORTALS ? ' (limite)' : '');
-  }
+  };
 
   self.send = async function(){
     const map = window.map;
@@ -865,198 +852,176 @@ def processar_plano(portal_bytes: bytes,
         "job_id": job_id
     }
 
-# ---------- AUTENTICAÇÃO SIMPLES (usuário/senha + token em ?token=) ----------
-def pbkdf2_hash(password:str, salt:bytes=None, iterations:int=200_000):
-    if salt is None:
-        salt = os.urandom(16)
-    pwd = password.encode("utf-8")
-    phash = hashlib.pbkdf2_hmac("sha256", pwd, salt, iterations, dklen=32)
-    return salt, phash
+# ====================== AUTENTICAÇÃO LEVE (usuário/senha) ======================
+ADMIN_CODE = st.secrets.get("ADMIN_CODE", st.secrets.get("ADMIN_PASS", ""))  # fallback
+ENABLE_FORUM = bool(st.secrets.get("ENABLE_FORUM", True))
+COMMENTS_ENABLED = bool(st.secrets.get("COMMENTS_ENABLED", True))
+MAX_IMG_MB = int(st.secrets.get("MAX_IMG_MB", 2))
+MAX_IMGS_PER_POST = int(st.secrets.get("MAX_IMGS_PER_POST", 3))
 
-def verify_password(password:str, salt:bytes, phash:bytes) -> bool:
-    test = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000, dklen=32)
-    return hmac.compare_digest(test, phash)
+AVATAR_ROOT = os.path.join("data", "avatars")
+os.makedirs(AVATAR_ROOT, exist_ok=True)
 
-def get_user_by_uid(uid:str):
-    cur = get_db().execute("SELECT id,uid,name,faction,email,pass_salt,pass_hash,avatar_path,is_admin FROM users WHERE uid=?", (uid,))
-    return cur.fetchone()
+def hash_pw(pw: str) -> str:
+    # leve (não use para dados sensíveis)
+    return hashlib.sha256(("mf_salt::" + (pw or "")).encode("utf-8")).hexdigest()
 
-def get_user_by_name_or_email(identifier:str):
-    cur = get_db().execute("SELECT id,uid,name,faction,email,pass_salt,pass_hash,avatar_path,is_admin FROM users WHERE name=? OR email=?", (identifier, identifier))
-    return cur.fetchone()
-
-def get_user_by_id(user_id:int):
-    cur = get_db().execute("SELECT id,uid,name,faction,email,pass_salt,pass_hash,avatar_path,is_admin FROM users WHERE id=?", (user_id,))
-    return cur.fetchone()
-
-def name_exists_for_other(name:str, uid:str):
-    row = get_db().execute("SELECT uid FROM users WHERE name=?", (name,)).fetchone()
-    return bool(row and row[0] != uid)
-
-def create_or_update_profile(uid:str, name:str, faction:str, email:str|None, password:str|None, admin_code:str|None, avatar_file=None):
-    """
-    Cria/atualiza perfil. Nome é único. Se password for fornecida, atualiza hash.
-    Se admin_code correto, marca is_admin=1.
-    Salva avatar (opcional).
-    """
-    if not name or name_exists_for_other(name, uid):
-        return None, "Este nome de usuário já está em uso."
-
-    now = int(time.time())
+def users_get_by_username(username: str):
     conn = get_db()
+    cur = conn.execute("SELECT id,username,pass_hash,faction,email,is_admin,avatar_path FROM users WHERE username_lc=?",
+                       (username.strip().lower(),))
+    row = cur.fetchone()
+    return row
 
-    # pega existente por uid
-    ex = conn.execute("SELECT id FROM users WHERE uid=?", (uid,)).fetchone()
+def users_create(username: str, pw: str, faction: str, email: str|None, is_admin: bool, avatar_file) -> tuple[bool,str,dict|None]:
+    if not username or not pw:
+        return False, "Usuário e senha são obrigatórios.", None
+    if len(username) < 3:
+        return False, "Usuário deve ter pelo menos 3 caracteres.", None
+    if len(pw) < 4:
+        return False, "Senha deve ter pelo menos 4 caracteres.", None
+    if faction not in ("Enlightened", "Resistance"):
+        return False, "Selecione uma facção válida.", None
 
-    is_admin = 0
-    if admin_code and ADMIN_CODE and admin_code == ADMIN_CODE:
-        is_admin = 1
-
-    salt, phash = (None, None)
-    if password:
-        salt, phash = pbkdf2_hash(password)
-
+    conn = get_db()
+    uid = uuid.uuid4().hex[:10]
     avatar_path = None
-    user_id = None
-    if ex:
-        user_id = ex[0]
-        if salt and phash:
-            conn.execute("UPDATE users SET name=?, faction=?, email=?, pass_salt=?, pass_hash=?, is_admin=(is_admin OR ?), created_ts=COALESCE(created_ts,?) WHERE uid=?",
-                         (name, faction, email, salt, phash, is_admin, now, uid))
-        else:
-            conn.execute("UPDATE users SET name=?, faction=?, email=?, is_admin=(is_admin OR ?), created_ts=COALESCE(created_ts,?) WHERE uid=?",
-                         (name, faction, email, is_admin, now, uid))
-    else:
-        if not password:
-            return None, "Defina uma senha para registrar seu perfil."
-        conn.execute("INSERT INTO users(uid,name,faction,email,pass_salt,pass_hash,is_admin,created_ts) VALUES(?,?,?,?,?,?,?,?)",
-                     (uid, name, faction, email, salt, phash, is_admin, now))
-        user_id = conn.execute("SELECT id FROM users WHERE uid=?", (uid,)).fetchone()[0]
-
-    # avatar
-    if avatar_file:
+    # salva avatar (opcional) em data/avatars/<uid>/avatar.ext
+    if avatar_file is not None:
         try:
-            ext = os.path.splitext(avatar_file.name)[1].lower()
-            if ext not in [".png",".jpg",".jpeg",".webp",".gif"]:
-                ext = ".png"
-            av_root = os.path.join("data","avatars", str(user_id))
-            os.makedirs(av_root, exist_ok=True)
-            av_path = os.path.join(av_root, f"avatar{ext}")
-            with open(av_path, "wb") as out:
-                out.write(avatar_file.read())
-            conn.execute("UPDATE users SET avatar_path=? WHERE id=?", (av_path, user_id))
-            avatar_path = av_path
-        except Exception:
-            pass
+            content = avatar_file.getvalue()
+            if len(content) > MAX_IMG_MB * 1024 * 1024:
+                return False, f"Avatar excede {MAX_IMG_MB}MB.", None
+            ext = os.path.splitext(avatar_file.name or "")[1].lower() or ".png"
+            user_dir = os.path.join(AVATAR_ROOT, uid)
+            os.makedirs(user_dir, exist_ok=True)
+            avatar_path = os.path.join(user_dir, f"avatar{ext}")
+            with open(avatar_path, "wb") as f:
+                f.write(content)
+        except Exception as e:
+            return False, f"Falha ao salvar avatar: {e}", None
 
-    conn.commit()
-    return get_user_by_uid(uid), None
-
-def current_user_is_admin(user_row):
-    return bool(user_row and user_row[8])
-
-def issue_token(user_id:int, days:int=30):
-    token = uuid.uuid4().hex
-    expires = int(time.time()) + days*24*3600
-    conn = get_db()
-    conn.execute("INSERT OR REPLACE INTO auth_tokens(token,user_id,expires_ts) VALUES(?,?,?)", (token, user_id, expires))
-    conn.commit()
-    return token, expires
-
-def revoke_token(token:str):
-    conn = get_db()
-    conn.execute("DELETE FROM auth_tokens WHERE token=?", (token,))
-    conn.commit()
-
-def get_user_from_token(token:str):
-    if not token: return None
-    row = get_db().execute("SELECT user_id,expires_ts FROM auth_tokens WHERE token=?", (token,)).fetchone()
-    if not row: return None
-    user_id, exp = row
-    if int(time.time()) > int(exp):
-        revoke_token(token)
-        return None
-    return get_user_by_id(int(user_id))
-
-def faction_chip(fac:str):
-    if fac == "ENL":
-        return '<span class="mf-chip enl">Enlightened</span>'
-    if fac == "RES":
-        return '<span class="mf-chip res">Resistance</span>'
-    return ""
-
-# ---------- Fórum helpers ----------
-def forum_create_post(cat:str, title:str, body:str, author_id:int, files:list):
-    now = int(time.time())
-    conn = get_db()
-    cur = conn.execute("INSERT INTO forum_posts(cat,title,body,author_id,created_ts) VALUES(?,?,?,?,?)",
-                       (cat, title, body, author_id, now))
-    post_id = cur.lastrowid
-    if files:
-        att_root = os.path.join("data","forum","attachments", str(post_id))
-        os.makedirs(att_root, exist_ok=True)
-        for f in files:
-            safe = f.name.replace("/", "_").replace("\\","_")
-            p = os.path.join(att_root, safe)
-            with open(p, "wb") as out:
-                out.write(f.read())
-            mime = getattr(f, "type", "application/octet-stream")
-            conn.execute("INSERT INTO forum_attachments(post_id,path,mime) VALUES(?,?,?)", (post_id, p, mime))
-    conn.commit()
-    return post_id
-
-def forum_list_posts_with_counts(cat:str, limit:int=50):
-    cur = get_db().execute("""
-        SELECT p.id, p.title, p.body, p.created_ts, u.name, u.faction, u.id, u.is_admin,
-               (SELECT COUNT(*) FROM forum_comments c WHERE c.post_id=p.id) AS comments_count
-        FROM forum_posts p LEFT JOIN users u ON p.author_id=u.id
-        WHERE p.cat=?
-        ORDER BY p.created_ts DESC LIMIT ?
-    """, (cat, limit))
-    return cur.fetchall()
-
-def forum_get_post(post_id:int):
-    conn = get_db()
-    post = conn.execute("""
-        SELECT p.id, p.cat, p.title, p.body, p.created_ts, u.name, u.faction, u.id, u.is_admin, u.avatar_path
-        FROM forum_posts p LEFT JOIN users u ON p.author_id=u.id
-        WHERE p.id=?
-    """, (post_id,)).fetchone()
-    atts = conn.execute("SELECT id,path,mime FROM forum_attachments WHERE post_id=?", (post_id,)).fetchall()
-    cmts = conn.execute("""
-        SELECT c.id, c.body, c.created_ts, u.name, u.faction, u.id, u.is_admin, u.avatar_path
-        FROM forum_comments c LEFT JOIN users u ON c.author_id=u.id
-        WHERE c.post_id=? ORDER BY c.created_ts ASC
-    """, (post_id,)).fetchall()
-    return post, atts, cmts
-
-def forum_add_comment(post_id:int, body:str, author_id:int):
-    now = int(time.time())
-    conn = get_db()
-    conn.execute("INSERT INTO forum_comments(post_id,body,author_id,created_ts) VALUES(?,?,?,?)",
-                 (post_id, body, author_id, now))
-    conn.commit()
-
-def forum_delete_comment(comment_id:int, requester_user):
-    conn = get_db()
-    row = conn.execute("SELECT c.id, c.author_id FROM forum_comments c WHERE c.id=?", (comment_id,)).fetchone()
-    if not row: return False
-    is_admin = current_user_is_admin(requester_user)
-    if is_admin or (requester_user and requester_user[0] == row[1]):
-        conn.execute("DELETE FROM forum_comments WHERE id=?", (comment_id,))
+    try:
+        conn.execute("""
+            INSERT INTO users(id,username,username_lc,pass_hash,faction,email,is_admin,avatar_path,created_ts)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (uid, username, username.lower(), hash_pw(pw), faction, email or "", 1 if is_admin else 0, avatar_path or "", int(time.time())))
         conn.commit()
-        return True
+        return True, "Conta criada com sucesso.", {"id": uid, "username": username, "faction": faction,
+                                                   "email": email or "", "is_admin": bool(is_admin),
+                                                   "avatar_path": avatar_path}
+    except sqlite3.IntegrityError:
+        return False, "Este nome de usuário já existe.", None
+
+def users_update_avatar(user_id: str, avatar_file) -> tuple[bool,str,str|None]:
+    if avatar_file is None:
+        return False, "Nenhum arquivo enviado.", None
+    content = avatar_file.getvalue()
+    if len(content) > MAX_IMG_MB * 1024 * 1024:
+        return False, f"Avatar excede {MAX_IMG_MB}MB.", None
+    ext = os.path.splitext(avatar_file.name or "")[1].lower() or ".png"
+    user_dir = os.path.join(AVATAR_ROOT, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    avatar_path = os.path.join(user_dir, f"avatar{ext}")
+    try:
+        with open(avatar_path, "wb") as f:
+            f.write(content)
+        conn = get_db()
+        conn.execute("UPDATE users SET avatar_path=? WHERE id=?", (avatar_path, user_id))
+        conn.commit()
+        return True, "Avatar atualizado.", avatar_path
+    except Exception as e:
+        return False, f"Falha ao salvar avatar: {e}", None
+
+def sessions_create(user_id: str) -> str:
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    ts = int(time.time())
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO sessions(token,user_id,created_ts,last_seen_ts) VALUES (?,?,?,?)",
+                 (token, user_id, ts, ts))
+    conn.commit()
+    return token
+
+def sessions_touch(token: str):
+    try:
+        conn = get_db()
+        conn.execute("UPDATE sessions SET last_seen_ts=? WHERE token=?", (int(time.time()), token))
+        conn.commit()
+    except Exception:
+        pass
+
+def sessions_get_user(token: str):
+    conn = get_db()
+    cur = conn.execute("""
+        SELECT u.id,u.username,u.faction,u.email,u.is_admin,u.avatar_path
+        FROM sessions s JOIN users u ON s.user_id = u.id
+        WHERE s.token=?
+    """, (token,))
+    row = cur.fetchone()
+    return row
+
+def login_verify(username: str, pw: str):
+    row = users_get_by_username(username)
+    if not row:
+        return False, "Usuário não encontrado.", None
+    uid, uname, pwh, faction, email, is_admin, avatar_path = row
+    if hash_pw(pw) != (pwh or ""):
+        return False, "Senha incorreta.", None
+    return True, "Login ok.", {"id": uid, "username": uname, "faction": faction,
+                               "email": email or "", "is_admin": bool(is_admin),
+                               "avatar_path": avatar_path or ""}
+
+def ensure_user_session_from_token():
+    tok = qp_get("token", "")
+    if tok:
+        row = sessions_get_user(tok)
+        if row:
+            uid, uname, faction, email, is_admin, avatar_path = row
+            st.session_state["auth"] = {
+                "token": tok,
+                "user": {"id": uid, "username": uname, "faction": faction,
+                         "email": email or "", "is_admin": bool(is_admin),
+                         "avatar_path": avatar_path or ""}
+            }
+            sessions_touch(tok)
+            return True
     return False
 
-# ---------- UI Principal (tabs) ----------
+# inicia sessão a partir de ?token= (se existir)
+if "auth" not in st.session_state:
+    ensure_user_session_from_token()
+
+def logout():
+    # remove token da URL e da sessão (não apaga da tabela para simplificar)
+    tok = st.session_state.get("auth", {}).get("token", "")
+    if tok:
+        qp_set(token=None)
+    st.session_state.pop("auth", None)
+    try: st.toast("Você saiu da conta.")
+    except: pass
+    st.experimental_rerun()
+
+def show_user_badge():
+    auth = st.session_state.get("auth")
+    if not auth: return
+    u = auth["user"]
+    av = u.get("avatar_path") or ""
+    avatar_tag = ""
+    if av and os.path.exists(av):
+        # serve a imagem via st.image ao lado? Usaremos <img> inline (ok em file:// local)
+        avatar_tag = f'<img class="mf-avatar" src="file://{os.path.abspath(av)}" alt="avatar" />'
+    fac = u.get("faction", "")
+    chip = f'<span class="mf-chip {"res" if fac=="Resistance" else "enl"}">{fac}</span>' if fac else ""
+    st.markdown(f'{avatar_tag} **{u.get("username","")}** {chip}', unsafe_allow_html=True)
+
+# ====================== UI Principal (tabs) ======================
 tab_gen, tab_hist, tab_metrics, tab_forum = st.tabs(["🧩 Gerar plano", "🕑 Histórico", "📊 Métricas", "💬 Fórum"])
 
+# ---------------------- TAB: GERAR PLANO ----------------------
 with tab_gen:
-    # Preview de cores da facção
     st.markdown('<span class="mf-chip enl">Enlightened</span><span class="mf-chip res">Resistance</span>', unsafe_allow_html=True)
 
-    # Modo rápido
-    fast_mode = st.toggle("⚡ Modo rápido (desliga GIF e CSV para máxima velocidade)", value=False)
+    fast_mode = st.toggle("⚡ Modo rápido (desliga GIF e CSV para máxima velocidade)", value=False, key="fast_mode_toggle")
 
     with st.form("plan_form"):
         uploaded = st.file_uploader(
@@ -1095,28 +1060,28 @@ with tab_gen:
 
         col1, col2 = st.columns(2)
         with col1:
-            num_agents = st.number_input("Número de agentes", min_value=1, max_value=50, value=1, step=1)
+            num_agents = st.number_input("Número de agentes", min_value=1, max_value=50, value=1, step=1, key="inp_num_agents")
         with col2:
-            num_cpus = st.number_input("CPUs a usar (0 = máximo)", min_value=0, max_value=128, value=0, step=1)
+            num_cpus = st.number_input("CPUs a usar (0 = máximo)", min_value=0, max_value=128, value=0, step=1, key="inp_num_cpus")
 
-        team = st.selectbox("Facção (cores)", ["Enlightened (verde)", "Resistance (azul)"])
+        team = st.selectbox("Facção (cores)", ["Enlightened (verde)", "Resistance (azul)"], key="inp_team")
         output_csv_default = False if fast_mode else True
         gif_default = False
-        output_csv = st.checkbox("Gerar CSV", value=output_csv_default, disabled=fast_mode)
+        output_csv = st.checkbox("Gerar CSV", value=output_csv_default, disabled=fast_mode, key="chk_csv")
         st.caption("Dica: no celular o CSV é ruim de editar. No Modo Rápido ele fica desativado por padrão.")
-        gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=gif_default, disabled=fast_mode)
+        gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=gif_default, disabled=fast_mode, key="chk_gif")
 
         st.markdown("**Mapa de fundo (opcional):**")
         google_key_input = st.text_input(
             "Google Maps API key (opcional)",
             value="",
+            key="inp_gkey",
             help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente."
         )
-        google_api_secret = st.text_input("Google Maps API secret (opcional)", value="", type="password")
+        google_api_secret = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="inp_gsecret")
 
-        submitted = st.form_submit_button("Gerar plano")
+        submitted = st.form_submit_button("Gerar plano", use_container_width=True)
 
-    # ===== Enfileirar job =====
     if submitted:
         if uploaded:
             portal_bytes = uploaded.getvalue()
@@ -1156,7 +1121,7 @@ with tab_gen:
         )
 
         eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team, "output_csv": output_csv}
+        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team}
 
         st.session_state["_clear_text"] = True
         st.session_state["uploader_key"] += 1
@@ -1170,9 +1135,9 @@ with tab_gen:
         except Exception:
             pass
 
-        st.rerun()
+        st.experimental_rerun()
 
-# ===== UI de acompanhamento do job =====
+# ---------------------- ACOMPANHAMENTO DE JOB ----------------------
 job_id = st.session_state.get("job_id")
 if job_id:
     job = get_job(job_id)
@@ -1259,7 +1224,7 @@ if job_id:
             del st.session_state["job_id"]
             qp_set(job=None)
 
-# ===== Render de resultados persistentes =====
+# ---------------------- Render de resultados persistentes ----------------------
 res = st.session_state.get("last_result")
 if res:
     st.success("Plano gerado com sucesso!")
@@ -1302,12 +1267,12 @@ if res:
             log_txt = log_txt_full
         st.code(log_txt, language="bash")
 
-    if st.button("🧹 Limpar resultados"):
+    if st.button("🧹 Limpar resultados", key="btn_clear_results"):
         st.session_state.pop("last_result", None)
         qp_set(job=None)
-        st.rerun()
+        st.experimental_rerun()
 
-# ---------- HISTÓRICO (últimas 24h por usuário) ----------
+# ---------------------- HISTÓRICO ----------------------
 with tab_hist:
     st.caption(f"Seu ID anônimo: `{UID}` — os planos abaixo ficam disponíveis por 24h.")
     rows = list_jobs_recent(uid=UID, within_hours=24, limit=50)
@@ -1329,23 +1294,23 @@ with tab_hist:
                     if os.path.exists(pm):
                         with cols[0]:
                             st.download_button("Portal Map", data=open(pm,"rb").read(),
-                                               file_name="portal_map.png", mime="image/png")
+                                               file_name="portal_map.png", mime="image/png", key=f"dl_pm_{jid}")
                     if os.path.exists(lm):
                         with cols[1]:
                             st.download_button("Link Map", data=open(lm,"rb").read(),
-                                               file_name="link_map.png", mime="image/png")
+                                               file_name="link_map.png", mime="image/png", key=f"dl_lm_{jid}")
                     if os.path.exists(gif_p):
                         with cols[2]:
                             st.download_button("GIF", data=open(gif_p,"rb").read(),
-                                               file_name="plan_movie.gif", mime="image/gif")
+                                               file_name="plan_movie.gif", mime="image/gif", key=f"dl_gif_{jid}")
                     if zip_p and os.path.exists(zip_p):
                         with cols[3]:
                             st.download_button("ZIP", data=open(zip_p,"rb").read(),
-                                               file_name=os.path.basename(zip_p), mime="application/zip")
+                                               file_name=os.path.basename(zip_p), mime="application/zip", key=f"dl_zip_{jid}")
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
 
-# ---------- MÉTRICAS ----------
+# ---------------------- MÉTRICAS ----------------------
 with tab_metrics:
     conn = get_db()
     cur = conn.execute("SELECT ts, n_portais, num_cpus, gif, dur_s FROM runs ORDER BY ts DESC LIMIT 100")
@@ -1363,198 +1328,326 @@ with tab_metrics:
         st.bar_chart(df[["dur_s"]].iloc[::-1], height=180)
         st.caption("Barras (da mais antiga para a mais recente) mostram a duração por execução.")
 
-# ---------- FÓRUM ----------
+# ====================== FÓRUM (debate e melhorias) ======================
+def forum_count_comments(post_id: str) -> int:
+    conn = get_db()
+    cur = conn.execute("SELECT COUNT(*) FROM forum_comments WHERE post_id=?", (post_id,))
+    return int(cur.fetchone()[0])
+
+def forum_create_post(author_id: str, author_name: str, category: str, title: str, body: str, images) -> tuple[bool,str]:
+    if not title.strip() or not body.strip():
+        return False, "Título e conteúdo são obrigatórios."
+    if category not in ("Atualizações", "Sugestões", "Críticas", "Dúvidas"):
+        return False, "Categoria inválida."
+
+    # salva imagens (opcional)
+    imgs = []
+    if images:
+        if len(images) > MAX_IMGS_PER_POST:
+            return False, f"Máximo {MAX_IMGS_PER_POST} imagens."
+        post_id = uuid.uuid4().hex[:12]
+        post_dir = os.path.join("data", "forum_images", post_id)
+        os.makedirs(post_dir, exist_ok=True)
+        for i, f in enumerate(images):
+            content = f.getvalue()
+            if len(content) > MAX_IMG_MB * 1024 * 1024:
+                return False, f"Cada imagem deve ter até {MAX_IMG_MB}MB."
+            ext = os.path.splitext(f.name or "")[1].lower() or ".png"
+            path = os.path.join(post_dir, f"img_{i}{ext}")
+            with open(path, "wb") as out:
+                out.write(content)
+            imgs.append(path)
+    else:
+        post_id = uuid.uuid4().hex[:12]
+
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO forum_posts(id,ts,author_id,author_name,category,title,body,images_json)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (post_id, int(time.time()), author_id, author_name, category, title.strip(), body.strip(), json.dumps(imgs)))
+    conn.commit()
+    return True, post_id
+
+def forum_list_posts(category: str) -> list[tuple]:
+    conn = get_db()
+    cur = conn.execute("""
+        SELECT id, ts, author_id, author_name, title, images_json
+        FROM forum_posts
+        WHERE category=?
+        ORDER BY ts DESC
+        LIMIT 200
+    """, (category,))
+    return cur.fetchall()
+
+def forum_get_post(post_id: str):
+    conn = get_db()
+    cur = conn.execute("""
+        SELECT id, ts, author_id, author_name, category, title, body, images_json
+        FROM forum_posts WHERE id=?
+    """, (post_id,))
+    return cur.fetchone()
+
+def forum_add_comment(post_id: str, author_id: str, author_name: str, body: str) -> tuple[bool,str]:
+    if not body.strip():
+        return False, "Comentário vazio."
+    cid = uuid.uuid4().hex[:12]
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO forum_comments(id, ts, post_id, author_id, author_name, body)
+        VALUES (?,?,?,?,?,?)
+    """, (cid, int(time.time()), post_id, author_id, author_name, body.strip()))
+    conn.commit()
+    return True, cid
+
+def forum_list_comments(post_id: str) -> list[tuple]:
+    conn = get_db()
+    cur = conn.execute("""
+        SELECT id, ts, author_id, author_name, body
+        FROM forum_comments
+        WHERE post_id=?
+        ORDER BY ts ASC
+        LIMIT 500
+    """, (post_id,))
+    return cur.fetchall()
+
+def forum_delete_comment(comment_id: str, by_user_id: str, is_admin: bool) -> bool:
+    conn = get_db()
+    cur = conn.execute("SELECT author_id FROM forum_comments WHERE id=?", (comment_id,))
+    row = cur.fetchone()
+    if not row: return False
+    author_id = row[0]
+    if (by_user_id == author_id) or is_admin:
+        conn.execute("DELETE FROM forum_comments WHERE id=?", (comment_id,))
+        conn.commit()
+        return True
+    return False
+
+def is_admin_user() -> bool:
+    auth = st.session_state.get("auth")
+    return bool(auth and auth.get("user", {}).get("is_admin"))
+
+def current_user():
+    return st.session_state.get("auth", {}).get("user")
+
+def set_autorefresh(enabled: bool):
+    st.session_state["forum_autorefresh"] = bool(enabled)
+
+def inject_autorefresh(seconds: int = 20):
+    st.markdown(
+        f"""
+        <script>
+        setTimeout(function(){{
+            location.reload();
+        }}, {int(seconds*1000)});
+        </script>
+        """, unsafe_allow_html=True
+    )
+
 with tab_forum:
-    st.subheader("💬 Fórum (debate e melhorias)")
-    st.caption("Categorias: **Atualizações** (somente admin), **Sugestões**, **Críticas** e **Dúvidas** (qualquer usuário).")
-
-    # --- Auto-login por token na URL ---
-    current_token = qp_get("token", "")
-    me = None
-    if current_token:
-        me = get_user_from_token(current_token)
-
-    # se ainda não tem token, tenta lembrar pelo uid (só se já tiver perfil e senha)
-    if not me:
-        temp = get_user_by_uid(UID)
-        me = temp  # apenas para preencher form; não autentica sem token
-
-    # ---- Barra de sessão: Login / Registrar / Sair ----
-    with st.expander("👤 Minha conta", expanded=(me is None)):
-        colA, colB = st.columns(2)
-
-        # Registrar/Editar perfil
-        with colA:
-            st.markdown("**Registrar / Editar perfil**")
-            d_name = st.text_input("Nome de usuário (único)", value=(me[2] if me else ""))
-            d_faction = st.selectbox("Facção", ["Enlightened (ENL)", "Resistance (RES)"], index=(0 if not me or me[3]=="ENL" else 1))
-            d_email = st.text_input("E-mail (opcional)", value=(me[4] if me else ""))
-            d_pass1 = st.text_input("Senha", type="password")
-            d_pass2 = st.text_input("Confirmar senha", type="password")
-            d_admin = st.text_input("Código de admin (opcional)", type="password")
-            d_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=False)
-            if st.button("Salvar perfil"):
-                if not d_name.strip():
-                    st.warning("Informe um nome de usuário.")
-                elif (not me) and (not d_pass1 or d_pass1 != d_pass2):
-                    st.warning("Defina e confirme a senha.")
-                elif (d_pass1 and d_pass2 and d_pass1 != d_pass2):
-                    st.warning("As senhas não coincidem.")
-                else:
-                    fac = "ENL" if d_faction.startswith("Enlightened") else "RES"
-                    new_me, err = create_or_update_profile(
-                        UID, d_name.strip(), fac, d_email.strip() or None,
-                        d_pass1 if d_pass1 else None,
-                        d_admin.strip() or None,
-                        d_avatar
-                    )
-                    if err:
-                        st.error(err)
-                    else:
-                        st.success("Perfil salvo!")
-                        # se já tem senha (ou acabou de definir), emitir novo token
-                        if new_me and new_me[5] and new_me[6]:
-                            token, _ = issue_token(new_me[0])
-                            qp_set(token=token)  # fixa na URL
-                        st.rerun()
-
-        # Login / Logout
-        with colB:
-            if me and current_token:
-                # mostrar avatar/nome
-                avatar_html = ""
-                if me[7] and os.path.exists(me[7]):
-                    avatar_html = f'<img src="file://{os.path.abspath(me[7])}" class="mf-avatar">'
-                st.markdown(f"{avatar_html} Logado como **{me[2]}** {faction_chip(me[3])}", unsafe_allow_html=True)
-                if st.button("Sair"):
-                    revoke_token(current_token)
-                    qp_set(token=None)
-                    st.success("Sessão encerrada.")
-                    st.rerun()
+    if not ENABLE_FORUM:
+        st.info("O fórum está desativado no momento.")
+    else:
+        # topo: status do usuário
+        st.subheader("💬 Fórum (debate e melhorias)")
+        leftU, rightU = st.columns([3, 2])
+        with leftU:
+            if "auth" in st.session_state:
+                show_user_badge()
             else:
-                st.markdown("**Entrar**")
-                li_user = st.text_input("Usuário ou e-mail")
-                li_pass = st.text_input("Senha", type="password")
-                if st.button("Entrar"):
-                    row = get_user_by_name_or_email(li_user.strip())
-                    if not row or not row[5] or not row[6]:
-                        st.error("Usuário não encontrado ou sem senha definida.")
+                st.caption("Você não está logado.")
+
+        with rightU:
+            # Auto-refresh toggle (20s)
+            auto_on = st.toggle("🔄 Auto-atualizar a cada 20s", value=st.session_state.get("forum_autorefresh", False), key="toggle_autorefresh")
+            set_autorefresh(auto_on)
+
+        if st.session_state.get("forum_autorefresh"):
+            inject_autorefresh(20)
+
+        # ===== Login / Registro =====
+        auth = st.session_state.get("auth")
+        with st.expander("👤 Entrar / Criar conta", expanded=(auth is None)):
+            tabs_lr = st.tabs(["Entrar", "Criar conta", "Perfil"])
+            # Entrar
+            with tabs_lr[0]:
+                li_user = st.text_input("Usuário", key="login_user")
+                li_pass = st.text_input("Senha", type="password", key="login_pass")
+                col_li1, col_li2 = st.columns(2)
+                with col_li1:
+                    if st.button("Entrar", key="btn_login"):
+                        ok, msg, user = login_verify(li_user, li_pass)
+                        if ok:
+                            token = sessions_create(user["id"])
+                            st.session_state["auth"] = {"token": token, "user": user}
+                            qp_set(token=token)  # grava na URL
+                            try: st.success("Login realizado!"); st.toast("Login realizado!")
+                            except: pass
+                            st.experimental_rerun()
+                        else:
+                            st.error(msg)
+                with col_li2:
+                    if st.button("Sair", key="btn_logout"):
+                        logout()
+
+            # Criar conta
+            with tabs_lr[1]:
+                ru_user = st.text_input("Usuário (único)", key="reg_user")
+                ru_pass = st.text_input("Senha", type="password", key="reg_pass")
+                ru_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key="reg_faction")
+                ru_email = st.text_input("E-mail (opcional)", key="reg_email")
+                ru_admin = st.text_input("Código de admin (opcional)", help="Apenas se você for o administrador.", key="reg_admin_code")
+                ru_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key="reg_avatar")
+
+                if st.button("Criar conta", key="btn_register"):
+                    is_admin = (ru_admin.strip() != "" and ru_admin.strip() == (ADMIN_CODE or ""))
+                    ok, msg, user = users_create(ru_user.strip(), ru_pass, ru_faction, ru_email.strip() or None, is_admin, ru_avatar)
+                    if ok:
+                        try: st.success(msg); st.toast("Conta criada! Faça login.")
+                        except: pass
                     else:
-                        if verify_password(li_pass, row[5], row[6]):
-                            token, _ = issue_token(row[0])
-                            qp_set(token=token, uid=row[1])  # garante uid correto na URL
-                            st.success("Login realizado!")
-                            st.rerun()
+                        st.error(msg)
+
+            # Perfil
+            with tabs_lr[2]:
+                auth = st.session_state.get("auth")
+                if not auth:
+                    st.info("Faça login para editar seu perfil.")
+                else:
+                    u = auth["user"]
+                    st.write(f"**Usuário:** {u.get('username')}  ·  **Facção:** {u.get('faction')}")
+                    st.write(f"**Admin:** {'Sim' if u.get('is_admin') else 'Não'}")
+                    av_up = st.file_uploader("Atualizar avatar", type=["png","jpg","jpeg","webp"], key="profile_avatar")
+                    if st.button("Salvar avatar", key="btn_save_avatar"):
+                        ok, msg, path = users_update_avatar(u["id"], av_up)
+                        if ok:
+                            st.session_state["auth"]["user"]["avatar_path"] = path or ""
+                            try: st.success(msg); st.toast("Avatar atualizado.")
+                            except: pass
+                            st.experimental_rerun()
                         else:
-                            st.error("Senha incorreta.")
+                            st.error(msg)
 
-    # se não está autenticado por token, limita interações
-    authed = bool(current_token and me and get_user_from_token(current_token))
+        st.markdown("---")
 
-    # --- Auto-atualização opcional ---
-    auto_refresh = st.toggle("🔄 Auto-atualizar esta aba (a cada 20s)", value=False)
-    if auto_refresh:
-        st.markdown(
-            "<script> if (window.mfAutoRefresh) clearInterval(window.mfAutoRefresh); "
-            "window.mfAutoRefresh = setInterval(()=>{ location.reload(); }, 20000); </script>",
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown("<script> if (window.mfAutoRefresh) { clearInterval(window.mfAutoRefresh); window.mfAutoRefresh=null; } </script>", unsafe_allow_html=True)
+        # ===== Categorias do fórum =====
+        cat_tabs = st.tabs(["📢 Atualizações", "💡 Sugestões", "🗣️ Críticas", "❓ Dúvidas"])
+        categories = ["Atualizações", "Sugestões", "Críticas", "Dúvidas"]
 
-    # Categoria
-    cat = st.segmented_control("Categoria", options=["Atualizações","Sugestões","Críticas","Dúvidas"], default="Atualizações")
-    cat_map = {"Atualizações":"updates","Sugestões":"suggestions","Críticas":"critics","Dúvidas":"doubts"}
-    cat_key = cat_map[cat]
-
-    can_open = authed
-    if cat_key == "updates" and not (authed and current_user_is_admin(me)):
-        can_open = False
-
-    # Criar tópico
-    if can_open:
-        with st.expander("➕ Abrir novo tópico", expanded=False):
-            title = st.text_input("Título do tópico")
-            body = st.text_area("Conteúdo", height=160, placeholder="Descreva sua atualização/sugestão/crítica/dúvida…")
-            files = st.file_uploader("Imagens (opcional)", type=["png","jpg","jpeg","gif","webp"], accept_multiple_files=True)
-            if st.button("Postar tópico"):
-                if not title.strip():
-                    st.warning("Dê um título ao tópico.")
-                elif not body.strip():
-                    st.warning("Escreva o conteúdo do tópico.")
+        for idx, cat in enumerate(categories):
+            with cat_tabs[idx]:
+                # Composer
+                can_post = False
+                if cat == "Atualizações":
+                    can_post = is_admin_user()
                 else:
-                    pid = forum_create_post(cat_key, title.strip(), body.strip(), author_id=me[0], files=files or [])
-                    st.success("Tópico publicado!")
-                    st.rerun()
-    else:
-        if cat_key == "updates":
-            st.info("Somente administradores podem abrir tópicos em **Atualizações**.")
-        elif not authed:
-            st.info("Entre na sua conta para abrir tópicos e comentar.")
+                    can_post = (st.session_state.get("auth") is not None)
 
-    # Lista de tópicos (com contador de comentários)
-    posts = forum_list_posts_with_counts(cat_key, limit=50)
-    if not posts:
-        st.info("Ainda não há tópicos nesta categoria.")
-    else:
-        for (pid, title, body, cts, author_name, author_fac, author_id, author_admin, comments_count) in posts:
-            dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
-            chip = faction_chip(author_fac)
-            with st.container(border=True):
-                st.markdown(f"### {title}  \n**Comentários ({comments_count})**")
-                st.markdown(f"{chip} **{author_name or 'anônimo'}** — {dt}", unsafe_allow_html=True)
-                st.markdown(body)
-
-                # anexos + comentários
-                post, atts, cmts = forum_get_post(pid)
-                if atts:
-                    cols = st.columns(min(3, len(atts)))
-                    for i, (_, path, mime) in enumerate(atts):
-                        with cols[i % len(cols)]:
-                            try:
-                                if mime.startswith("image/"):
-                                    st.image(path, use_container_width=True)
-                                else:
-                                    st.download_button("Anexo", data=open(path,"rb").read(),
-                                                       file_name=os.path.basename(path), mime=mime)
-                            except Exception:
-                                st.caption("_Não foi possível exibir um anexo._")
-
-                # comentários existentes
-                st.markdown("**Comentários**")
-                if not cmts:
-                    st.caption("Seja o primeiro a comentar.")
+                if can_post:
+                    st.subheader(f"Novo tópico em {cat}")
+                    cp_title = st.text_input("Título", key=f"cp_title_{cat}")
+                    cp_body = st.text_area("Conteúdo", key=f"cp_body_{cat}", height=140)
+                    cp_imgs = st.file_uploader(
+                        f"Imagens (até {MAX_IMGS_PER_POST} · {MAX_IMG_MB}MB cada)",
+                        type=["png","jpg","jpeg","webp"], accept_multiple_files=True, key=f"cp_imgs_{cat}"
+                    )
+                    if st.button("Postar", key=f"btn_post_{cat}"):
+                        u = current_user()
+                        if not u:
+                            st.error("Faça login para postar.")
+                        else:
+                            ok, post_id = forum_create_post(u["id"], u["username"], cat, cp_title, cp_body, cp_imgs)
+                            if ok:
+                                try: st.success("Postagem enviada!"); st.toast("Post publicado.")
+                                except: pass
+                                st.experimental_rerun()
+                            else:
+                                st.error(post_id)
                 else:
-                    for (cid, cbody, cts2, cname, cfac, cauthor_id, cauthor_admin, cavatar) in cmts:
-                        cdt = datetime.fromtimestamp(cts2).strftime("%Y-%m-%d %H:%M")
-                        cchip = faction_chip(cfac)
-                        av_html = ""
-                        if cavatar and os.path.exists(cavatar):
-                            av_html = f'<img src="file://{os.path.abspath(cavatar)}" class="mf-avatar">'
+                    if cat == "Atualizações":
+                        st.info("Apenas o administrador pode iniciar tópicos nesta categoria.")
+
+                # Lista de tópicos
+                st.markdown("### Tópicos")
+                posts = forum_list_posts(cat)
+                if not posts:
+                    st.caption("Ainda sem tópicos aqui.")
+                else:
+                    # Se houver ?post=, mostra foco
+                    focus_post = qp_get("post", "")
+                    for (pid, ts, author_id, author_name, title, images_json) in posts:
+                        n_comments = forum_count_comments(pid)
+                        dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
                         with st.container(border=True):
-                            st.markdown(f"{av_html}{cchip} **{cname or 'anônimo'}** — {cdt}", unsafe_allow_html=True)
-                            st.markdown(cbody)
-                            if authed and (current_user_is_admin(me) or me[0] == cauthor_id):
-                                if st.button(f"🗑️ Apagar comentário #{cid}", key=f"delc-{cid}"):
-                                    ok = forum_delete_comment(cid, me)
-                                    if ok:
-                                        st.success("Comentário apagado.")
-                                        st.rerun()
-                                    else:
-                                        st.error("Você não tem permissão para apagar este comentário.")
+                            st.write(f"**{title}**  — por _{author_name}_ em {dt}  ·  💬 {n_comments} comentários")
+                            cols = st.columns(2)
+                            with cols[0]:
+                                if st.button("Abrir", key=f"open_{cat}_{pid}"):
+                                    qp_set(post=pid)
+                                    st.experimental_rerun()
+                            with cols[1]:
+                                if is_admin_user() and st.button("Copiar link", key=f"copylink_{cat}_{pid}"):
+                                    # Apenas feedback
+                                    try: st.toast("Link copiado (confira a barra de endereços).")
+                                    except: pass
 
-                # novo comentário
-                if authed:
-                    newc = st.text_area("Escrever um comentário…", key=f"cbox-{pid}", height=100)
-                    if st.button("Comentar", key=f"cbtn-{pid}"):
-                        if not newc.strip():
-                            st.warning("O comentário está vazio.")
-                        else:
-                            forum_add_comment(pid, newc.strip(), author_id=me[0])
-                            st.success("Comentário publicado!")
-                            st.rerun()
-                else:
-                    st.info("Entre na sua conta para comentar.")
+                    # Exibição do tópico selecionado + comentários
+                    sel = qp_get("post", "")
+                    if sel:
+                        rec = forum_get_post(sel)
+                        if rec:
+                            pid, ts, author_id, author_name, category, title, body, images_json = rec
+                            st.markdown("---")
+                            st.subheader(title)
+                            st.caption(f"por {author_name} em {datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')} · Categoria: {category}")
+                            if body:
+                                st.markdown(body)
+                            imgs = []
+                            try:
+                                imgs = json.loads(images_json or "[]")
+                            except Exception:
+                                imgs = []
+                            if imgs:
+                                st.caption("Imagens:")
+                                gcols = st.columns(min(3, len(imgs)))
+                                for i, p in enumerate(imgs):
+                                    with gcols[i % len(gcols)]:
+                                        if os.path.exists(p):
+                                            st.image(p)
+
+                            st.markdown("#### Comentários")
+                            if not COMMENTS_ENABLED:
+                                st.info("Comentários estão desativados pelo administrador.")
+                            else:
+                                comms = forum_list_comments(pid)
+                                u = current_user()
+                                if comms:
+                                    for (cid, cts, caid, caname, cbody) in comms:
+                                        with st.container(border=True):
+                                            st.markdown(f"**{caname}** — {datetime.fromtimestamp(cts).strftime('%Y-%m-%d %H:%M')}")
+                                            st.write(cbody)
+                                            if u and (u["id"] == caid or u.get("is_admin")):
+                                                if st.button("Apagar comentário", key=f"delc_{cid}"):
+                                                    if forum_delete_comment(cid, u["id"], bool(u.get("is_admin"))):
+                                                        try: st.toast("Comentário removido.")
+                                                        except: pass
+                                                        st.experimental_rerun()
+                                                    else:
+                                                        st.error("Não foi possível remover o comentário.")
+                                else:
+                                    st.caption("Sem comentários ainda.")
+
+                                if u:
+                                    newc = st.text_area("Escreva um comentário", key=f"newc_{pid}", height=100)
+                                    if st.button("Comentar", key=f"btnc_{pid}"):
+                                        ok, msg = forum_add_comment(pid, u["id"], u["username"], newc)
+                                        if ok:
+                                            try: st.success("Comentário enviado!"); st.toast("Comentário publicado.")
+                                            except: pass
+                                            st.experimental_rerun()
+                                        else:
+                                            st.error(msg)
+                                else:
+                                    st.info("Faça login para comentar.")
 
 # ---------- Rodapé ----------
 st.markdown("---")
