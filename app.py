@@ -33,11 +33,28 @@ st.set_page_config(
     layout="centered",
 )
 
+# ====== Estado inicial para Modo Rápido (antes de CSS de BG) ======
+FAST_MODE = bool(st.session_state.get("fast_mode", False))
+
 # ===== Fundo + cartão responsivo (claro/escuro automático) =====
-bg_url = st.secrets.get("BG_URL", "").strip()
+bg_url = "" if FAST_MODE else st.secrets.get("BG_URL", "").strip()
 st.markdown(
     f"""
     <style>
+    /* Tabs maiores: estilo botão/cabeçalho */
+    div.stTabs [data-baseweb="tab"] {{
+      padding: 12px 18px !important;
+      font-size: 1rem !important;
+      font-weight: 700 !important;
+      border-radius: 12px 12px 0 0 !important;
+    }}
+    div.stTabs [data-baseweb="tab"] p {{ margin: 0 !important; }}
+    div.stTabs [data-baseweb="tab-list"] {{ gap: 8px !important; }}
+    div.stTabs [data-baseweb="tab-highlight"] {{
+      height: 4px !important;
+      border-radius: 4px !important;
+    }}
+
     .stApp {{
       {"background: url('" + bg_url + "') no-repeat center center fixed; background-size: cover;" if bg_url else ""}
     }}
@@ -643,7 +660,6 @@ st.markdown(
 - Informe **nº de agentes** e **CPUs**.  
 - **Mapa de fundo (opcional)**: informe uma **Google Maps API key**. **Ou deixe em branco para usar a nossa**.  
 - Resultados: **imagens**, **CSVs** e (se permitido) **GIF** com o passo-a-passo.  
-- Dica: use **🔖 Salvar rascunho na URL** para preservar sua lista **antes** de gerar (seguro dar F5).
     """
 )
 
@@ -660,18 +676,6 @@ with b3:
 with b4:
     TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
     st.link_button("▶️ Tutorial (via IITC)", TUTORIAL_IITC_URL)
-
-# ---------- Seção de Rascunho ----------
-st.markdown("### 📝 Rascunho")
-c1, c2 = st.columns(2)
-if c1.button("🔖 Salvar rascunho na URL"):
-    qp_set(list=st.session_state.get("txt_content", "") or "")
-    try: st.toast("Rascunho salvo em ?list= (pode dar F5 com segurança).")
-    except Exception: pass
-if c2.button("🧹 Limpar rascunho da URL"):
-    qp_set(list=None)
-    try: st.toast("Rascunho removido da URL.")
-    except Exception: pass
 
 # ---------- PWA Lite (manifest + SW via Blob) ----------
 st.markdown("""
@@ -909,11 +913,10 @@ def processar_plano(portal_bytes: bytes,
     }
 
 # ---------- UI Principal (tabs) ----------
-# adiciona a aba Fórum se habilitada
 ENABLE_FORUM = bool(st.secrets.get("ENABLE_FORUM", True))
-tabs = ["🧩 Gerar plano", "🕑 Histórico", "📊 Métricas"]
+tabs = ["🧭 Gerar plano", "🕘 Histórico", "📈 Métricas"]
 if ENABLE_FORUM:
-    tabs.append("💬 Fórum (debate e melhorias)")
+    tabs.append("💬 Fórum")
 tab_objs = st.tabs(tabs)
 
 tab_gen = tab_objs[0]
@@ -924,7 +927,8 @@ tab_forum = tab_objs[3] if ENABLE_FORUM else None
 with tab_gen:
     st.markdown('<span class="mf-chip enl">Enlightened</span><span class="mf-chip res">Resistance</span>', unsafe_allow_html=True)
 
-    fast_mode = st.toggle("⚡ Modo rápido (desliga GIF e CSV para máxima velocidade)", value=False, key="fast_mode")
+    # Toggle Modo Rápido (salvo na sessão, e também controla BG + sem mapa)
+    fast_mode = st.toggle("⚡ Modo rápido (desliga GIF/CSV e o mapa de fundo para máxima velocidade)", value=FAST_MODE, key="fast_mode")
 
     with st.form("plan_form"):
         uploaded = st.file_uploader(
@@ -983,10 +987,10 @@ with tab_gen:
         # renomeado para evitar conflito com a var final
         google_api_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
 
-        # NOVO: sem mapa (ignora Google Maps nessa execução)
+        # NOVO: sem mapa (ignora Google Maps nesta execução) — padrão ligado no Modo Rápido
         sem_mapa = st.checkbox(
             "Sem mapa de fundo (mais rápido/robusto)",
-            value=False,
+            value=bool(st.session_state.get("fast_mode", False)),
             help="Ignora a API do Google nesta execução (útil quando a rede/quotas estão instáveis).",
             key="no_bg_map"
         )
@@ -1016,8 +1020,9 @@ with tab_gen:
 
         output_csv = (not st.session_state.get("fast_mode", False)) and bool(output_csv)
 
-        # aplica "Sem mapa de fundo"
-        if sem_mapa:
+        # aplica "Sem mapa de fundo" OU modo rápido
+        force_no_map = bool(st.session_state.get("fast_mode", False)) or bool(sem_mapa)
+        if force_no_map:
             google_api_key = None
             google_api_secret = None
         else:
@@ -1330,6 +1335,26 @@ def get_user_by_username_or_email(identifier: str):
         "pass_salt": row[8] or "",
     }
 
+def get_user_by_id(user_id:int):
+    conn = get_db()
+    cur = conn.execute("""
+        SELECT id, username, username_lc, faction, email, avatar_ext, is_admin
+          FROM users
+         WHERE id=? LIMIT 1
+    """, (int(user_id),))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0]),
+        "username": row[1] or "",
+        "username_lc": row[2] or "",
+        "faction": row[3] or "",
+        "email": row[4] or "",
+        "avatar_ext": row[5] or None,
+        "is_admin": int(row[6] or 0),
+    }
+
 def create_user(username: str,
                 password: str,
                 faction: str,
@@ -1515,6 +1540,31 @@ def forum_delete_comment(comment_id:int):
     get_db().execute("UPDATE forum_comments SET deleted_ts=? WHERE id=?", (_now_ts(), int(comment_id)))
     get_db().commit()
 
+# ---- Helpers de avatar no fórum ----
+def gravatar_url(email: str | None, size: int = 28) -> str:
+    if not email:
+        return f"https://www.gravatar.com/avatar/?d=identicon&s={size}"
+    h = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
+    return f"https://www.gravatar.com/avatar/{h}?d=identicon&s={size}"
+
+def user_avatar_source(user_id:int) -> tuple[str|None, bytes|None]:
+    """
+    Retorna (url, bytes). Se houver arquivo local de avatar, retorna bytes.
+    Caso contrário, retorna URL do Gravatar (se houver e-mail) ou identicon.
+    """
+    u = get_user_by_id(user_id)
+    if not u:
+        return (gravatar_url(None), None)
+    ext = u.get("avatar_ext")
+    if ext:
+        p = os.path.join("data","avatars",str(u["id"]), f"avatar{ext}")
+        if os.path.exists(p):
+            try:
+                return (None, open(p,"rb").read())
+            except Exception:
+                pass
+    return (gravatar_url(u.get("email") or None), None)
+
 def require_login_ui():
     u = current_user()
     if u:
@@ -1596,11 +1646,11 @@ if tab_forum is not None:
                     signout_current()
             with colC:
                 # avatar preview
-                av_ext = u.get("avatar_ext")
-                if av_ext:
-                    p = os.path.join("data","avatars",str(u["id"]), f"avatar{av_ext}")
-                    if os.path.exists(p):
-                        st.image(open(p,"rb").read(), caption="Seu avatar", width=64)
+                av_url, av_bytes = user_avatar_source(u["id"])
+                if av_bytes:
+                    st.image(av_bytes, caption="Seu avatar", width=64)
+                else:
+                    st.image(av_url, caption="Seu avatar", width=64)
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1623,7 +1673,7 @@ if tab_forum is not None:
                                 st.error("Informe um título.")
                             else:
                                 pid = forum_create_post(cat, nt_title, nt_body, nt_imgs, u)
-                                st.success("Postagem enviada!")
+                                st.success("Postagem enviado!")
                                 st.experimental_rerun()
                 else:
                     st.caption("_Apenas admin pode publicar em Atualizações._")
@@ -1678,15 +1728,21 @@ if tab_forum is not None:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
-                                        line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}"
-                                        colc1, colc2 = st.columns([0.85,0.15])
+                                        # Linha com nome + data; avatar à direita (padrão fórum)
+                                        colc1, colc2 = st.columns([0.88,0.12])
                                         with colc1:
+                                            line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}"
                                             st.markdown(line)
                                             if cbody:
                                                 st.markdown(cbody)
                                         with colc2:
+                                            av_url, av_bytes = user_avatar_source(int(caid))
+                                            if av_bytes:
+                                                st.image(av_bytes, use_column_width=True)
+                                            else:
+                                                st.image(av_url, use_column_width=True)
                                             if u["is_admin"]==1 or int(u["id"])==int(caid):
-                                                if st.button("🗑️ Apagar", key=f"delc_{cid}"):
+                                                if st.button("🗑️", key=f"delc_{cid}"):
                                                     forum_delete_comment(cid)
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
