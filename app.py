@@ -617,7 +617,7 @@ if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
   info.script = { version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description };
 }
 script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
-(document.body || document.head || document.documentElement).appendChild(script);
+(document.body || document.documentElement).appendChild(script);
 """
 
 IITC_USERSCRIPT = (IITC_USERSCRIPT_TEMPLATE
@@ -806,10 +806,16 @@ def processar_plano(portal_bytes: bytes,
     with open(portal_path, "wb") as f:
         f.write(portal_bytes)
 
+    # ---- timestamps no log
+    t0 = time.time()
+    def t(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
     log_buffer = io.StringIO()
     try:
         with redirect_stdout(log_buffer):
+            t("INÍCIO processar_plano")
             print(f"[INFO] os.cpu_count()={os.cpu_count()} · num_cpus={num_cpus} · gif={fazer_gif} · csv={output_csv}")
+            t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
                 num_agents=int(num_agents),
@@ -822,16 +828,14 @@ def processar_plano(portal_bytes: bytes,
                 verbose=True,
                 skip_step_plots=(not fazer_gif),
             )
+            t(f"maxfield() OK em {time.time()-t0:.1f}s")
+            t1 = time.time()
+            t("Compactando artefatos no ZIP…")
     except Exception as e:
         log_buffer.write(f"\n[ERRO] {e}\n")
         raise
     finally:
-        log_txt = log_buffer.getvalue()
-
-    # Salva log para o ZIP
-    log_path = os.path.join(outdir, "maxfield_log.txt")
-    with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
-        lf.write(log_txt or "")
+        pass  # buffer só será lido após ZIP
 
     # Compacta tudo do outdir
     zip_path = os.path.join(outdir, f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
@@ -842,7 +846,16 @@ def processar_plano(portal_bytes: bytes,
                 fp = os.path.join(root, fn)
                 arc = os.path.relpath(fp, outdir)
                 z.write(fp, arcname=arc)
-    zip_bytes = open(zip_path, "rb").read()
+    # fecha o marcador do ZIP no log
+    with redirect_stdout(log_buffer):
+        print(f"[{time.strftime('%H:%M:%S')}] ZIP pronto em {time.time()-t1:.1f}s; total {time.time()-t0:.1f}s")
+
+    log_txt = log_buffer.getvalue()
+
+    # Salva log para o ZIP
+    log_path = os.path.join(outdir, "maxfield_log.txt")
+    with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
+        lf.write(log_txt or "")
 
     # lê artefatos
     def read_bytes(path):
@@ -882,6 +895,8 @@ def processar_plano(portal_bytes: bytes,
 </html>"""
     with open(os.path.join(outdir, "summary.html"), "w", encoding="utf-8") as f:
         f.write(summary_html)
+
+    zip_bytes = open(zip_path, "rb").read()
 
     return {
         "zip_bytes": zip_bytes,
@@ -965,7 +980,16 @@ with tab_gen:
             help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente.",
             key="g_key"
         )
-        google_api_secret = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
+        # renomeado para evitar conflito com a var final
+        google_api_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
+
+        # NOVO: sem mapa (ignora Google Maps nessa execução)
+        sem_mapa = st.checkbox(
+            "Sem mapa de fundo (mais rápido/robusto)",
+            value=False,
+            help="Ignora a API do Google nesta execução (útil quando a rede/quotas estão instáveis).",
+            key="no_bg_map"
+        )
 
         submitted = st.form_submit_button("Gerar plano", use_container_width=True)
 
@@ -992,8 +1016,13 @@ with tab_gen:
 
         output_csv = (not st.session_state.get("fast_mode", False)) and bool(output_csv)
 
-        google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
-        google_api_secret = (google_api_secret or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
+        # aplica "Sem mapa de fundo"
+        if sem_mapa:
+            google_api_key = None
+            google_api_secret = None
+        else:
+            google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
+            google_api_secret = (google_api_secret_input or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
 
         kwargs = dict(
             portal_bytes=portal_bytes,
@@ -1066,16 +1095,40 @@ if job_id:
             fut = job["future"]
             t0 = job["t0"]
             eta_s = job["eta"]
+            canceled = False
             with st.status(f"⏳ Processando… (job {job_id})", expanded=True) as status:
                 bar = st.progress(0)
                 eta_ph = st.empty()
+                cancel_ph = st.empty()
+                if cancel_ph.button("🛑 Cancelar este job", key=f"cancel_{job_id}"):
+                    canceled = True
+                    try:
+                        fut.cancel()
+                        status.update(label="🛑 Cancelando…", state="error", expanded=True)
+                    except Exception:
+                        pass
+
                 while not fut.done():
+                    if canceled:
+                        break
                     elapsed = time.time() - t0
                     pct = min(0.90, elapsed / max(1e-6, eta_s))
                     bar.progress(int(pct * 100))
                     eta_left = max(0, eta_s - elapsed)
                     eta_ph.write(f"**Estimativa:** ~{int(eta_left)}s restantes · **Decorridos:** {int(elapsed)}s")
                     time.sleep(0.3)
+
+            if canceled:
+                if fut.cancelled():
+                    job["done"] = True
+                    job["out"] = {"ok": False, "error": "Job cancelado pelo usuário"}
+                else:
+                    job["done"] = True
+                    job["out"] = {"ok": False, "error": "Cancelamento solicitado (não foi possível interromper em execução)"}
+                del st.session_state["job_id"]
+                qp_set(job=None)
+                st.stop()
+
             out = fut.result()
             bar.progress(100)
             job["done"] = True
@@ -1479,7 +1532,7 @@ def require_login_ui():
                 token = create_session(usr["id"])
                 st.session_state["user"] = usr
                 qp_set(token=token)
-                try: st.toast("Login ok!"); 
+                try: st.toast("Login ok!")
                 except: pass
                 st.experimental_rerun()
 
