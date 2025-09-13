@@ -15,6 +15,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 
+# --- Evita over-subscription de threads nativas (OpenBLAS/MKL/OMP/NumExpr) ---
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+# ------------------------------------------------------------------------------
+
 # ---------- Pygifsicle stub (evita depender do gifsicle) ----------
 fake = types.ModuleType("pygifsicle")
 def optimize(*args, **kwargs):
@@ -23,7 +30,7 @@ fake.optimize = optimize
 sys.modules["pygifsicle"] = fake
 # ------------------------------------------------------------------
 
-# Maxfield
+# Maxfield (importa DEPOIS de limitar threads)
 from maxfield.maxfield import maxfield as run_maxfield
 
 # ---------- Config do Streamlit ----------
@@ -773,8 +780,7 @@ if "job_id" not in st.session_state:
         else:
             qp_set(job=None)
 
-# ---------- Processamento principal (cache com TTL) ----------
-@st.cache_data(show_spinner=False, ttl=3600)
+# ---------- Processamento principal (SEM cache) ----------
 def processar_plano(portal_bytes: bytes,
                     num_agents: int,
                     num_cpus: int,
@@ -794,20 +800,28 @@ def processar_plano(portal_bytes: bytes,
     with open(portal_path, "wb") as f:
         f.write(portal_bytes)
 
-    # ---- timestamps no log
+    # ---- timestamps + info no log
     t0 = time.time()
     def t(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    # CPUs efetivas (clamp sensato)
+    num_cpus_eff = int(num_cpus)
+    if num_cpus_eff <= 0:
+        num_cpus_eff = min(os.cpu_count() or 1, 4)
+    else:
+        num_cpus_eff = max(1, min(num_cpus_eff, 8))
 
     log_buffer = io.StringIO()
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · num_cpus={num_cpus} · gif={fazer_gif} · csv={output_csv}")
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={num_cpus} · cpus_eff={num_cpus_eff} · "
+                  f"gif={fazer_gif} · csv={output_csv} · team={team}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
                 num_agents=int(num_agents),
-                num_cpus=int(num_cpus),
+                num_cpus=int(num_cpus_eff),
                 res_colors=res_colors,
                 google_api_key=(google_api_key or None),
                 google_api_secret=(google_api_secret or None),
@@ -853,12 +867,12 @@ def processar_plano(portal_bytes: bytes,
     lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
     gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
 
-    # --- Plano resumido (somente arquivo local, sem botões de download) ---
+    # --- Plano resumido (arquivos locais para o ZIP) ---
     summary_md = []
     summary_md.append(f"# Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     summary_md.append(f"- **Job**: `{job_id}`")
     summary_md.append(f"- **Facção**: {'Resistance (azul)' if res_colors else 'Enlightened (verde)'}")
-    summary_md.append(f"- **Agentes**: {num_agents} · **CPUs**: {num_cpus} · **CSV**: {output_csv} · **GIF**: {fazer_gif}")
+    summary_md.append(f"- **Agentes**: {num_agents} · **CPUs**: {num_cpus_eff} · **CSV**: {output_csv} · **GIF**: {fazer_gif}")
     summary_md.append(f"- **Portais**: ver `portais.txt`")
     if os.path.exists(os.path.join(outdir, "portal_map.png")):
         summary_md.append(f"\n![Portal Map](portal_map.png)")
@@ -875,7 +889,7 @@ def processar_plano(portal_bytes: bytes,
 <h1>Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}</h1>
 <p><b>Job:</b> {job_id}<br>
 <b>Facção:</b> {"Resistance (azul)" if res_colors else "Enlightened (verde)"}<br>
-<b>Agentes:</b> {num_agents} · <b>CPUs:</b> {num_cpus} · <b>CSV:</b> {output_csv} · <b>GIF:</b> {fazer_gif}</p>
+<b>Agentes:</b> {num_agents} · <b>CPUs:</b> {num_cpus_eff} · <b>CSV:</b> {output_csv} · <b>GIF:</b> {fazer_gif}</p>
 <p>Portais: ver <code>portais.txt</code></p>
 {"<h2>Portal Map</h2><img src='portal_map.png'>" if os.path.exists(os.path.join(outdir,"portal_map.png")) else ""}
 {"<h2>Link Map</h2><img src='link_map.png'>" if os.path.exists(os.path.join(outdir,"link_map.png")) else ""}
@@ -1616,7 +1630,7 @@ if tab_forum is not None:
                     with st.expander("➕ Novo tópico", expanded=False):
                         nt_title = st.text_input("Título", key=f"nt_title_{cat}")
                         nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
-                        nt_imgs = st.file_uploader(f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True, key=f"nt_imgs_{cat}")
+                        nt_imgs = st.file_uploader(f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)", type=["png","jpg","jpeg",".webp","webp"], accept_multiple_files=True, key=f"nt_imgs_{cat}")
                         if st.button("Postar", key=f"nt_post_{cat}"):
                             if not nt_title.strip():
                                 st.error("Informe um título.")
