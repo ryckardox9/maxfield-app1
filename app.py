@@ -9,7 +9,6 @@ import time
 import statistics
 import uuid
 import json
-import base64
 from datetime import datetime, timedelta
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
@@ -75,6 +74,42 @@ st.markdown(
     .mf-badge {{
       display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; margin-left:8px;
       background:#00000022;
+    }}
+
+    /* ===== Tabs principais mais destacadas (pill, grandes) ===== */
+    .stTabs [role="tablist"]{{
+      gap: 10px;
+      border-bottom: none;
+    }}
+    .stTabs [role="tab"]{{
+      font-weight: 600;
+      font-size: 15px;
+      padding: 10px 16px;
+      border-radius: 999px !important;
+      border: 1px solid rgba(0,0,0,.10);
+      background: rgba(255,255,255,.75);
+      box-shadow: 0 1px 2px rgba(0,0,0,.08);
+      transition: transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
+    }}
+    .stTabs [role="tab"]:hover{{
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(0,0,0,.12);
+    }}
+    .stTabs [role="tab"][aria-selected="true"]{{
+      background: linear-gradient(180deg, rgba(46,170,220,.12), rgba(46,170,220,.06));
+      border-color: rgba(46,170,220,.35);
+    }}
+    @media (prefers-color-scheme: dark){{
+      .stTabs [role="tab"]{{
+        background: rgba(255,255,255,.08);
+        border-color: rgba(255,255,255,.18);
+        color: #eaeaea;
+      }}
+      .stTabs [role="tab"][aria-selected="true"]{{
+        background: linear-gradient(180deg, rgba(46,170,220,.28), rgba(46,170,220,.14));
+        border-color: rgba(46,170,220,.55);
+        color: #fff;
+      }}
     }}
     </style>
     """,
@@ -216,7 +251,6 @@ def get_metric(key: str) -> int:
     row = cur.fetchone()
     return int(row[0]) if row else 0
 
-# histórico de durações para melhorar ETA
 def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
     conn = get_db()
     conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
@@ -304,7 +338,6 @@ def daily_cleanup(retain_hours:int=24):
 
 daily_cleanup(retain_hours=24)
 
-# Conta visita 1x por sessão
 if "visit_counted" not in st.session_state:
     inc_metric("visits", 1)
     st.session_state["visit_counted"] = True
@@ -344,7 +377,6 @@ def extract_points(texto: str):
             continue
     return pts
 
-# ---------- Helpers de QueryString ----------
 def qp_get(name: str, default: str = "") -> str:
     try:
         params = getattr(st, "query_params", None)
@@ -377,7 +409,7 @@ def qp_set(**kwargs):
     except Exception:
         pass
 
-# ---------- Identificador de usuário anônimo ----------
+# ---------- Identificador anônimo ----------
 if "uid" not in st.session_state:
     cur_uid = qp_get("uid", "")
     if not cur_uid:
@@ -386,14 +418,14 @@ if "uid" not in st.session_state:
     st.session_state["uid"] = cur_uid
 UID = st.session_state["uid"]
 
-# ---------- Parâmetros público userscript ----------
+# ---------- Userscript params ----------
 PUBLIC_URL = (st.secrets.get("PUBLIC_URL", "https://maxfield.fun/").rstrip("/") + "/")
 MIN_ZOOM = int(st.secrets.get("MIN_ZOOM", 15))
 MAX_PORTALS = int(st.secrets.get("MAX_PORTALS", 200))
 MAX_URL_LEN = int(st.secrets.get("MAX_URL_LEN", 6000))
 DEST = PUBLIC_URL
 
-# ---------- Exemplo de entrada ----------
+# ---------- Exemplo ----------
 EXEMPLO_TXT = """# Exemplo de arquivo de portais (uma linha por portal)
 # Formato: Nome do Portal; URL do Intel (com pll=LAT,LON)
 Portal 1; https://intel.ingress.com/intel?pll=-10.912345,-37.065432
@@ -790,7 +822,7 @@ def processar_plano(portal_bytes: bytes,
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · num_cpus={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={num_cpus} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
@@ -991,17 +1023,10 @@ with tab_gen:
             google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
             google_api_secret = (google_api_secret_input or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
 
-        eff_cpus = int(num_cpus)
-        if eff_cpus == 0:
-            try:
-                eff_cpus = min(3, os.cpu_count() or 2)
-            except Exception:
-                eff_cpus = 2
-
         kwargs = dict(
             portal_bytes=portal_bytes,
             num_agents=int(num_agents),
-            num_cpus=int(eff_cpus),
+            num_cpus=int(num_cpus),
             res_colors=res_colors,
             google_api_key=google_api_key,
             google_api_secret=google_api_secret,
@@ -1010,8 +1035,8 @@ with tab_gen:
             team=team
         )
 
-        eta_s = estimate_eta_s(n_portais, int(eff_cpus), fazer_gif)
-        meta = {"n_portais": n_portais, "num_cpus": int(eff_cpus), "gif": fazer_gif, "team": team}
+        eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
+        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team}
 
         st.session_state["_clear_text"] = True
         st.session_state["uploader_key"] += 1
@@ -1235,6 +1260,24 @@ with tab_hist:
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
 
+# ---------- MÉTRICAS ----------
+with tab_metrics:
+    conn = get_db()
+    cur = conn.execute("SELECT ts, n_portais, num_cpus, gif, dur_s FROM runs ORDER BY ts DESC LIMIT 100")
+    data = cur.fetchall()
+    if not data:
+        st.info("Ainda sem dados suficientes para métricas.")
+    else:
+        import pandas as pd
+        df = pd.DataFrame(data, columns=["ts","n_portais","num_cpus","gif","dur_s"])
+        p50 = float(df["dur_s"].quantile(0.50))
+        p90 = float(df["dur_s"].quantile(0.90))
+        st.metric("Duração p50 (s)", f"{int(p50)}")
+        st.metric("Duração p90 (s)", f"{int(p90)}")
+        st.metric("Execuções (últimos 100)", f"{len(df)}")
+        st.bar_chart(df[["dur_s"]].iloc[::-1], height=180)
+        st.caption("Barras (da mais antiga para a mais recente) mostram a duração por execução.")
+
 # ===================== FORUM / LOGIN =====================
 import hashlib
 
@@ -1405,39 +1448,6 @@ def current_user():
             return u
     return None
 
-# ===== Helpers de AVATAR para fórum =====
-def _get_user_avatar_path_and_mime(user_id:int):
-    try:
-        cur = get_db().execute("SELECT avatar_ext FROM users WHERE id=? LIMIT 1", (int(user_id),))
-        row = cur.fetchone()
-        if not row: return None, None
-        ext = row[0]
-        if not ext: return None, None
-        p = os.path.join("data","avatars",str(int(user_id)), f"avatar{ext}")
-        if not os.path.exists(p): return None, None
-        mime = "image/png" if ext.lower()==".png" else ("image/webp" if ext.lower()==".webp" else "image/jpeg")
-        return p, mime
-    except Exception:
-        return None, None
-
-def avatar_img_tag(user_id:int, size:int=28) -> str:
-    p, mime = _get_user_avatar_path_and_mime(user_id)
-    if not p:
-        # Placeholder simples (círculo cinza)
-        return f"<span style='display:inline-block;width:{size}px;height:{size}px;border-radius:50%;background:#999;vertical-align:middle;margin-right:8px'></span>"
-    try:
-        b = open(p,"rb").read()
-        b64 = base64.b64encode(b).decode("ascii")
-        return f"<img src='data:{mime};base64,{b64}' style='width:{size}px;height:{size}px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:8px'/>"
-    except Exception:
-        return f"<span style='display:inline-block;width:{size}px;height:{size}px;border-radius:50%;background:#999;vertical-align:middle;margin-right:8px'></span>"
-
-def render_user_line_with_avatar(user_id:int, name:str, faction:str, dt_ts:int) -> str:
-    when = datetime.fromtimestamp(dt_ts).strftime('%Y-%m-%d %H:%M')
-    fac = faction or ""
-    return f"{avatar_img_tag(user_id, 28)}<strong>{name}</strong> · {fac or '—'} · {when}"
-
-# ===== Fórum: consultas =====
 def forum_count_comments(post_id:int) -> int:
     cur = get_db().execute("SELECT COUNT(*) FROM forum_comments WHERE post_id=? AND (deleted_ts IS NULL)", (int(post_id),))
     return int(cur.fetchone()[0])
@@ -1477,9 +1487,8 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
     return post_id
 
 def forum_list_posts(cat:str):
-    # inclui author_id para renderizar avatar na listagem
     cur = get_db().execute("""
-        SELECT id, title, author_id, author_name, author_faction, created_ts, images_json
+        SELECT id, title, author_name, author_faction, created_ts, images_json
           FROM forum_posts
          WHERE cat=?
          ORDER BY is_pinned DESC, created_ts DESC
@@ -1514,10 +1523,13 @@ def forum_delete_comment(comment_id:int):
     get_db().execute("UPDATE forum_comments SET deleted_ts=? WHERE id=?", (_now_ts(), int(comment_id)))
     get_db().commit()
 
-# ---- Fórum UI (agora visível sem login) ----
-def login_ui_inline():
+def require_login_ui():
+    u = current_user()
+    if u:
+        return u
+
     st.subheader("Entrar / Criar conta")
-    with st.expander("Já tenho conta", expanded=False):
+    with st.expander("Já tenho conta", expanded=True):
         li_user = st.text_input("Usuário ou e-mail", key="li_user")
         li_pass = st.text_input("Senha", type="password", key="li_pass")
         if st.button("Entrar", key="li_btn"):
@@ -1569,37 +1581,29 @@ def login_ui_inline():
                 except Exception as e:
                     st.error(f"Erro ao criar conta: {e}")
 
+    st.stop()
+
+# ---- Fórum UI ----
 if tab_forum is not None:
     with tab_forum:
         auto = st.toggle("🔄 Auto-atualizar a cada 20s", value=False, key="forum_auto")
         if auto:
             st.markdown("<script>setTimeout(()=>location.reload(),20000)</script>", unsafe_allow_html=True)
 
-        u = current_user()
+        u = current_user()  # pode ser None
 
-        # Cabeçalho do usuário (ou login inline)
+        # Cabeçalho: mostra login/opções lado a lado
         with st.container(border=True):
-            colA, colB, colC = st.columns([0.6,0.2,0.2])
-            if u:
-                with colA:
-                    line = render_user_line_with_avatar(u["id"], u["username"], u["faction"], _now_ts())
-                    st.markdown(line, unsafe_allow_html=True)
-                with colB:
+            colA, colB = st.columns([0.7,0.3])
+            with colA:
+                if u:
+                    st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
+                else:
+                    st.write("Você está navegando como visitante. Entre para comentar/postar.")
+            with colB:
+                if u:
                     if st.button("Sair", key="logout_btn"):
                         signout_current()
-                with colC:
-                    av_p, _ = _get_user_avatar_path_and_mime(u["id"])
-                    if av_p and os.path.exists(av_p):
-                        st.image(open(av_p,"rb").read(), caption="Seu avatar", width=64)
-            else:
-                with colA:
-                    st.write("Você está navegando como visitante. Faça login para postar e comentar.")
-                with colB:
-                    st.empty()
-                with colC:
-                    st.empty()
-        if not u:
-            login_ui_inline()
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1610,10 +1614,10 @@ if tab_forum is not None:
         for ci, ct in enumerate(cat_tabs):
             with ct:
                 cat = CATS[ci]
-                can_create = False
-                if u:
-                    can_create = (cat == "Atualizações" and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas"))
+                # criador: admin só em Atualizações; demais livres – mas precisa estar logado
+                can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
+                # caixa de login/registro aparece mesmo sem login (abaixo dos tópicos)
                 if can_create:
                     with st.expander("➕ Novo tópico", expanded=False):
                         nt_title = st.text_input("Título", key=f"nt_title_{cat}")
@@ -1627,24 +1631,31 @@ if tab_forum is not None:
                                 st.success("Postagem enviada!")
                                 st.experimental_rerun()
                 else:
-                    st.caption("_Faça login para criar um tópico._" if not u else ("_Apenas admin pode publicar em Atualizações._" if cat=="Atualizações" else ""))
+                    if not u:
+                        st.caption("_Entre para criar um novo tópico._")
+                    elif cat == "Atualizações" and u and u["is_admin"] != 1:
+                        st.caption("_Apenas admin pode publicar em Atualizações._")
 
-                # Lista de posts (visível para todos)
+                # Lista de posts
                 posts = forum_list_posts(cat)
                 if not posts:
                     st.info("Nenhum tópico ainda.")
                 else:
-                    for (pid, title, author_id, author_name, author_faction, cts, images_json) in posts:
+                    for (pid, title, author_name, author_faction, cts, images_json) in posts:
                         cnt = forum_count_comments(pid)
                         with st.container(border=True):
-                            top_cols = st.columns([0.85,0.15])
-                            with top_cols[0]:
-                                # Linha com avatar + autor + data
-                                header_html = f"{avatar_img_tag(author_id, 28)}<strong>{title}</strong><br><small>{(author_name or '—')} · {(author_faction or '—')} · {datetime.fromtimestamp(cts).strftime('%Y-%m-%d %H:%M')}</small>"
-                                st.markdown(header_html, unsafe_allow_html=True)
-                            with top_cols[1]:
-                                st.markdown(f"<div style='text-align:right'><span class='mf-badge'>{cnt} comentários</span></div>", unsafe_allow_html=True)
-
+                            cols = st.columns([0.75,0.25])
+                            with cols[0]:
+                                dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
+                                st.markdown(f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br><small>por {author_name} · {author_faction} · {dt}</small>", unsafe_allow_html=True)
+                            with cols[1]:
+                                if u and u["is_admin"]==1:
+                                    if st.button("Apagar tópico", key=f"del_post_{pid}"):
+                                        get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
+                                        get_db().execute("DELETE FROM forum_comments WHERE post_id=?", (int(pid),))
+                                        get_db().commit()
+                                        st.success("Tópico removido.")
+                                        st.experimental_rerun()
                             # conteúdo e imagens
                             post = forum_get_post(pid)
                             if post:
@@ -1665,7 +1676,7 @@ if tab_forum is not None:
                                             with ig_cols[i % len(ig_cols)]:
                                                 st.image(open(p,"rb").read())
 
-                            # comentários (visíveis a todos)
+                            # comentários (sempre visível; só bloqueia ação se não logado)
                             if COMMENTS_ENABLED:
                                 st.markdown("**Comentários:**")
                                 comms = forum_list_comments(pid)
@@ -1676,18 +1687,36 @@ if tab_forum is not None:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
-                                        row = st.columns([0.90,0.10])
+                                        # avatar à esquerda do cabeçalho do comentário
+                                        row = st.columns([0.08, 0.77, 0.15])
                                         with row[0]:
-                                            st.markdown(render_user_line_with_avatar(caid, caname, cafac, ctime), unsafe_allow_html=True)
+                                            # tenta carregar avatar
+                                            avatar_bytes = None
+                                            # descobre ext pelo users.id (caid)
+                                            conn = get_db()
+                                            cur = conn.execute("SELECT avatar_ext FROM users WHERE id=?", (int(caid),))
+                                            r = cur.fetchone()
+                                            av_ext = r[0] if r and r[0] else None
+                                            if av_ext:
+                                                ap = os.path.join("data","avatars",str(int(caid)), f"avatar{av_ext}")
+                                                if os.path.exists(ap):
+                                                    avatar_bytes = open(ap,"rb").read()
+                                            if avatar_bytes:
+                                                st.image(avatar_bytes, width=42)
+                                            else:
+                                                st.markdown("<div style='width:42px;height:42px;border-radius:50%;background:#999;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;'>👤</div>", unsafe_allow_html=True)
+                                        with row[1]:
+                                            line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}"
+                                            st.markdown(line)
                                             if cbody:
                                                 st.markdown(cbody)
-                                        with row[1]:
+                                        with row[2]:
                                             if u and (u["is_admin"]==1 or int(u["id"])==int(caid)):
                                                 if st.button("🗑️ Apagar", key=f"delc_{cid}"):
                                                     forum_delete_comment(cid)
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
-                                # novo comentário (apenas logado)
+                                # novo comentário
                                 if u:
                                     nc = st.text_area("Escreva um comentário", key=f"nc_{pid}", height=100)
                                     if st.button("Comentar", key=f"btn_nc_{pid}"):
@@ -1698,9 +1727,63 @@ if tab_forum is not None:
                                             st.success("Comentário publicado!")
                                             st.experimental_rerun()
                                 else:
-                                    st.caption("_Faça login para comentar._")
+                                    st.caption("_Entre para comentar._")
                             else:
                                 st.caption("_Comentários desabilitados._")
+
+                # caixa de login/registro no fim de cada aba, se visitante
+                if not u:
+                    st.markdown("---")
+                    st.subheader("Entrar / Criar conta")
+                    with st.expander("Já tenho conta", expanded=False):
+                        li_user = st.text_input("Usuário ou e-mail", key=f"li_user_{cat}")
+                        li_pass = st.text_input("Senha", type="password", key=f"li_pass_{cat}")
+                        if st.button("Entrar", key=f"li_btn_{cat}"):
+                            usr = get_user_by_username_or_email(li_user)
+                            if not usr or not check_password(usr, li_pass):
+                                st.error("Usuário ou senha inválidos.")
+                            else:
+                                token = create_session(usr["id"])
+                                st.session_state["user"] = usr
+                                qp_set(token=token)
+                                try: st.toast("Login ok!")
+                                except: pass
+                                st.experimental_rerun()
+                    with st.expander("Criar nova conta", expanded=False):
+                        su_user = st.text_input("Nome de usuário (único)", key=f"su_user_{cat}")
+                        su_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key=f"su_faction_{cat}")
+                        su_email = st.text_input("E-mail (opcional)", key=f"su_email_{cat}")
+                        su_pass = st.text_input("Senha", type="password", key=f"su_pass_{cat}")
+                        su_pass2 = st.text_input("Confirmar senha", type="password", key=f"su_pass2_{cat}")
+                        su_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key=f"su_avatar_{cat}")
+                        su_admin_code = st.text_input("Código de admin (deixe vazio se não for admin)", type="password", key=f"su_admin_code_{cat}")
+                        if st.button("Criar conta", key=f"su_btn_{cat}"):
+                            if not su_user or not su_pass:
+                                st.error("Preencha usuário e senha.")
+                            elif su_pass != su_pass2:
+                                st.error("As senhas não conferem.")
+                            else:
+                                is_admin = bool(ADMIN_CODE) and (su_admin_code.strip() == ADMIN_CODE.strip())
+                                av_bytes, av_ext = None, None
+                                if su_avatar is not None:
+                                    av_bytes = su_avatar.getvalue()
+                                    n = su_avatar.name.lower()
+                                    if n.endswith(".png"): av_ext=".png"
+                                    elif n.endswith(".jpg") or n.endswith(".jpeg"): av_ext=".jpg"
+                                    elif n.endswith(".webp"): av_ext=".webp"
+                                    else: av_ext=None
+                                try:
+                                    uid = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
+                                    usr = get_user_by_username_or_email(su_user)
+                                    token = create_session(usr["id"])
+                                    st.session_state["user"] = usr
+                                    qp_set(token=token)
+                                    st.success("Conta criada! Você já está logado.")
+                                    st.experimental_rerun()
+                                except ValueError as ve:
+                                    st.error(str(ve))
+                                except Exception as e:
+                                    st.error(f"Erro ao criar conta: {e}")
 
 # ---------- Rodapé ----------
 st.markdown("---")
