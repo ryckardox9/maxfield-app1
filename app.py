@@ -1260,24 +1260,6 @@ with tab_hist:
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
 
-# ---------- MÉTRICAS ----------
-with tab_metrics:
-    conn = get_db()
-    cur = conn.execute("SELECT ts, n_portais, num_cpus, gif, dur_s FROM runs ORDER BY ts DESC LIMIT 100")
-    data = cur.fetchall()
-    if not data:
-        st.info("Ainda sem dados suficientes para métricas.")
-    else:
-        import pandas as pd
-        df = pd.DataFrame(data, columns=["ts","n_portais","num_cpus","gif","dur_s"])
-        p50 = float(df["dur_s"].quantile(0.50))
-        p90 = float(df["dur_s"].quantile(0.90))
-        st.metric("Duração p50 (s)", f"{int(p50)}")
-        st.metric("Duração p90 (s)", f"{int(p90)}")
-        st.metric("Execuções (últimos 100)", f"{len(df)}")
-        st.bar_chart(df[["dur_s"]].iloc[::-1], height=180)
-        st.caption("Barras (da mais antiga para a mais recente) mostram a duração por execução.")
-
 # ===================== FORUM / LOGIN =====================
 import hashlib
 
@@ -1592,7 +1574,7 @@ if tab_forum is not None:
 
         u = current_user()  # pode ser None
 
-        # Cabeçalho: mostra login/opções lado a lado
+        # Cabeçalho do fórum
         with st.container(border=True):
             colA, colB = st.columns([0.7,0.3])
             with colA:
@@ -1604,6 +1586,65 @@ if tab_forum is not None:
                 if u:
                     if st.button("Sair", key="logout_btn"):
                         signout_current()
+
+        # >>>>>> LOGIN/REGISTRO IMEDIATAMENTE ABAIXO DO CABEÇALHO (se visitante)
+        def render_login_boxes_top():
+            with st.expander("Entrar / Criar conta", expanded=False):
+                colL, colR = st.columns(2)
+                with colL:
+                    st.markdown("**Já tenho conta**")
+                    li_user = st.text_input("Usuário ou e-mail", key="li_user_top")
+                    li_pass = st.text_input("Senha", type="password", key="li_pass_top")
+                    if st.button("Entrar", key="li_btn_top"):
+                        usr = get_user_by_username_or_email(li_user)
+                        if not usr or not check_password(usr, li_pass):
+                            st.error("Usuário ou senha inválidos.")
+                        else:
+                            token = create_session(usr["id"])
+                            st.session_state["user"] = usr
+                            qp_set(token=token)
+                            try: st.toast("Login ok!")
+                            except: pass
+                            st.experimental_rerun()
+                with colR:
+                    st.markdown("**Criar nova conta**")
+                    su_user = st.text_input("Nome de usuário (único)", key="su_user_top")
+                    su_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key="su_faction_top")
+                    su_email = st.text_input("E-mail (opcional)", key="su_email_top")
+                    su_pass = st.text_input("Senha", type="password", key="su_pass_top")
+                    su_pass2 = st.text_input("Confirmar senha", type="password", key="su_pass2_top")
+                    su_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key="su_avatar_top")
+                    su_admin_code = st.text_input("Código de admin (deixe vazio se não for admin)", type="password", key="su_admin_code_top")
+                    if st.button("Criar conta", key="su_btn_top"):
+                        if not su_user or not su_pass:
+                            st.error("Preencha usuário e senha.")
+                        elif su_pass != su_pass2:
+                            st.error("As senhas não conferem.")
+                        else:
+                            is_admin = bool(ADMIN_CODE) and (su_admin_code.strip() == ADMIN_CODE.strip())
+                            av_bytes, av_ext = None, None
+                            if su_avatar is not None:
+                                av_bytes = su_avatar.getvalue()
+                                n = su_avatar.name.lower()
+                                if n.endswith(".png"): av_ext=".png"
+                                elif n.endswith(".jpg") or n.endswith(".jpeg"): av_ext=".jpg"
+                                elif n.endswith(".webp"): av_ext=".webp"
+                                else: av_ext=None
+                            try:
+                                uid = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
+                                usr = get_user_by_username_or_email(su_user)
+                                token = create_session(usr["id"])
+                                st.session_state["user"] = usr
+                                qp_set(token=token)
+                                st.success("Conta criada! Você já está logado.")
+                                st.experimental_rerun()
+                            except ValueError as ve:
+                                st.error(str(ve))
+                            except Exception as e:
+                                st.error(f"Erro ao criar conta: {e}")
+
+        if not u:
+            render_login_boxes_top()
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1617,7 +1658,6 @@ if tab_forum is not None:
                 # criador: admin só em Atualizações; demais livres – mas precisa estar logado
                 can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
-                # caixa de login/registro aparece mesmo sem login (abaixo dos tópicos)
                 if can_create:
                     with st.expander("➕ Novo tópico", expanded=False):
                         nt_title = st.text_input("Título", key=f"nt_title_{cat}")
@@ -1676,7 +1716,7 @@ if tab_forum is not None:
                                             with ig_cols[i % len(ig_cols)]:
                                                 st.image(open(p,"rb").read())
 
-                            # comentários (sempre visível; só bloqueia ação se não logado)
+                            # comentários
                             if COMMENTS_ENABLED:
                                 st.markdown("**Comentários:**")
                                 comms = forum_list_comments(pid)
@@ -1687,12 +1727,10 @@ if tab_forum is not None:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
-                                        # avatar à esquerda do cabeçalho do comentário
+                                        # avatar + cabeçalho
                                         row = st.columns([0.08, 0.77, 0.15])
                                         with row[0]:
-                                            # tenta carregar avatar
                                             avatar_bytes = None
-                                            # descobre ext pelo users.id (caid)
                                             conn = get_db()
                                             cur = conn.execute("SELECT avatar_ext FROM users WHERE id=?", (int(caid),))
                                             r = cur.fetchone()
@@ -1730,60 +1768,6 @@ if tab_forum is not None:
                                     st.caption("_Entre para comentar._")
                             else:
                                 st.caption("_Comentários desabilitados._")
-
-                # caixa de login/registro no fim de cada aba, se visitante
-                if not u:
-                    st.markdown("---")
-                    st.subheader("Entrar / Criar conta")
-                    with st.expander("Já tenho conta", expanded=False):
-                        li_user = st.text_input("Usuário ou e-mail", key=f"li_user_{cat}")
-                        li_pass = st.text_input("Senha", type="password", key=f"li_pass_{cat}")
-                        if st.button("Entrar", key=f"li_btn_{cat}"):
-                            usr = get_user_by_username_or_email(li_user)
-                            if not usr or not check_password(usr, li_pass):
-                                st.error("Usuário ou senha inválidos.")
-                            else:
-                                token = create_session(usr["id"])
-                                st.session_state["user"] = usr
-                                qp_set(token=token)
-                                try: st.toast("Login ok!")
-                                except: pass
-                                st.experimental_rerun()
-                    with st.expander("Criar nova conta", expanded=False):
-                        su_user = st.text_input("Nome de usuário (único)", key=f"su_user_{cat}")
-                        su_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key=f"su_faction_{cat}")
-                        su_email = st.text_input("E-mail (opcional)", key=f"su_email_{cat}")
-                        su_pass = st.text_input("Senha", type="password", key=f"su_pass_{cat}")
-                        su_pass2 = st.text_input("Confirmar senha", type="password", key=f"su_pass2_{cat}")
-                        su_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key=f"su_avatar_{cat}")
-                        su_admin_code = st.text_input("Código de admin (deixe vazio se não for admin)", type="password", key=f"su_admin_code_{cat}")
-                        if st.button("Criar conta", key=f"su_btn_{cat}"):
-                            if not su_user or not su_pass:
-                                st.error("Preencha usuário e senha.")
-                            elif su_pass != su_pass2:
-                                st.error("As senhas não conferem.")
-                            else:
-                                is_admin = bool(ADMIN_CODE) and (su_admin_code.strip() == ADMIN_CODE.strip())
-                                av_bytes, av_ext = None, None
-                                if su_avatar is not None:
-                                    av_bytes = su_avatar.getvalue()
-                                    n = su_avatar.name.lower()
-                                    if n.endswith(".png"): av_ext=".png"
-                                    elif n.endswith(".jpg") or n.endswith(".jpeg"): av_ext=".jpg"
-                                    elif n.endswith(".webp"): av_ext=".webp"
-                                    else: av_ext=None
-                                try:
-                                    uid = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
-                                    usr = get_user_by_username_or_email(su_user)
-                                    token = create_session(usr["id"])
-                                    st.session_state["user"] = usr
-                                    qp_set(token=token)
-                                    st.success("Conta criada! Você já está logado.")
-                                    st.experimental_rerun()
-                                except ValueError as ve:
-                                    st.error(str(ve))
-                                except Exception as e:
-                                    st.error(f"Erro ao criar conta: {e}")
 
 # ---------- Rodapé ----------
 st.markdown("---")
