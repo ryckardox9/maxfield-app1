@@ -9,18 +9,12 @@ import time
 import statistics
 import uuid
 import json
+import base64
 from datetime import datetime, timedelta
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
-
-# --- Evita over-subscription de threads nativas (OpenBLAS/MKL/OMP/NumExpr) ---
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-# ------------------------------------------------------------------------------
 
 # ---------- Pygifsicle stub (evita depender do gifsicle) ----------
 fake = types.ModuleType("pygifsicle")
@@ -30,7 +24,7 @@ fake.optimize = optimize
 sys.modules["pygifsicle"] = fake
 # ------------------------------------------------------------------
 
-# Maxfield (importa DEPOIS de limitar threads)
+# Maxfield
 from maxfield.maxfield import maxfield as run_maxfield
 
 # ---------- Config do Streamlit ----------
@@ -129,10 +123,8 @@ def get_db():
         )
     """)
 
-    # --- NOVO: schema do fórum + usuários + sessões ---
-    # users
+    # --- Fórum + usuários + sessões ---
     conn.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT)")
-    # adiciona colunas se faltarem
     def colset(table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
     def ensure_col(table, col, decl):
@@ -153,7 +145,6 @@ def get_db():
         ("is_admin", "INTEGER DEFAULT 0"),
         ("created_ts", "INTEGER"),
         ("updated_ts", "INTEGER"),
-        # legados que já possam existir:
         ("uid", "TEXT"),
         ("name", "TEXT"),
         ("avatar_path", "TEXT"),
@@ -164,7 +155,6 @@ def get_db():
     except Exception:
         pass
 
-    # sessions
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions(
             token TEXT PRIMARY KEY,
@@ -175,7 +165,6 @@ def get_db():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
 
-    # forum tables
     conn.execute("CREATE TABLE IF NOT EXISTS forum_posts(id INTEGER PRIMARY KEY AUTOINCREMENT)")
     for col, decl in [
         ("cat", "TEXT"),
@@ -188,7 +177,6 @@ def get_db():
         ("updated_ts", "INTEGER"),
         ("images_json", "TEXT"),
         ("is_pinned", "INTEGER DEFAULT 0"),
-        # legados:
         ("ts", "INTEGER"),
         ("uid", "TEXT"),
         ("body", "TEXT"),
@@ -207,7 +195,6 @@ def get_db():
         ("body_md", "TEXT"),
         ("created_ts", "INTEGER"),
         ("deleted_ts", "INTEGER"),
-        # legados:
         ("ts", "INTEGER"),
         ("uid", "TEXT"),
         ("body", "TEXT"),
@@ -263,7 +250,7 @@ def list_jobs_recent(uid:str|None, within_hours:int=24, limit:int=50):
     return cur.fetchall()
 
 def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
-    base_pp = 0.35 if not gif else 0.55  # s por portal
+    base_pp = 0.35 if not gif else 0.55
     base_overhead = 3.0 if not gif else 8.0
     cpu_factor = 1.0 / max(1.0, (0.6 + 0.5*min(num_cpus, 8)**0.5))
     est = (base_overhead + base_pp*n_portais) * cpu_factor
@@ -280,7 +267,7 @@ def estimate_eta_s(n_portais:int, num_cpus:int, gif:bool) -> float:
             est = (pp_med * n_portais) * cpu_factor + (1.5 if not gif else 4.0)
     return max(2.0, est)
 
-# ---------- Housekeeping diário (limpa jobs antigos e runs >1d) ----------
+# ---------- Housekeeping diário ----------
 def daily_cleanup(retain_hours:int=24):
     conn = get_db()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -288,9 +275,8 @@ def daily_cleanup(retain_hours:int=24):
     row = cur.fetchone()
     last = row[0] if row else None
     if last == today:
-        return  # já limpou hoje
+        return
 
-    # apaga dirs mais antigos
     root = os.path.join("data", "jobs")
     now = time.time()
     if os.path.isdir(root):
@@ -310,14 +296,12 @@ def daily_cleanup(retain_hours:int=24):
                         except: pass
                 except: pass
 
-    # limpa rows antigas
     min_ts = int(time.time()) - retain_hours*3600
     conn.execute("DELETE FROM jobs WHERE ts < ?", (min_ts,))
     conn.execute("DELETE FROM runs WHERE ts < ?", (min_ts,))
     conn.execute("INSERT OR REPLACE INTO housekeeping(key,value) VALUES('last_cleanup', ?)", (today,))
     conn.commit()
 
-# roda limpeza diária
 daily_cleanup(retain_hours=24)
 
 # Conta visita 1x por sessão
@@ -341,7 +325,6 @@ def clean_invisibles(s: str) -> str:
         s = s.replace(ch, " " if ch == "\xa0" else "")
     return s
 
-# parse coords de intel urls com pll=lat,lon
 def extract_points(texto: str):
     pts = []
     for ln in texto.splitlines():
@@ -394,7 +377,7 @@ def qp_set(**kwargs):
     except Exception:
         pass
 
-# ---------- Identificador de usuário anônimo (uid via ?uid=) ----------
+# ---------- Identificador de usuário anônimo ----------
 if "uid" not in st.session_state:
     cur_uid = qp_get("uid", "")
     if not cur_uid:
@@ -403,15 +386,14 @@ if "uid" not in st.session_state:
     st.session_state["uid"] = cur_uid
 UID = st.session_state["uid"]
 
-# ---------- Parâmetros públicos do userscript via secrets ----------
+# ---------- Parâmetros público userscript ----------
 PUBLIC_URL = (st.secrets.get("PUBLIC_URL", "https://maxfield.fun/").rstrip("/") + "/")
 MIN_ZOOM = int(st.secrets.get("MIN_ZOOM", 15))
 MAX_PORTALS = int(st.secrets.get("MAX_PORTALS", 200))
 MAX_URL_LEN = int(st.secrets.get("MAX_URL_LEN", 6000))
-
 DEST = PUBLIC_URL
 
-# ---------- Exemplo de entrada (.txt) ----------
+# ---------- Exemplo de entrada ----------
 EXEMPLO_TXT = """# Exemplo de arquivo de portais (uma linha por portal)
 # Formato: Nome do Portal; URL do Intel (com pll=LAT,LON)
 Portal 1; https://intel.ingress.com/intel?pll=-10.912345,-37.065432
@@ -419,7 +401,7 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- Userscript IITC (polido: contador + copiar txt) ----------
+# ---------- Userscript IITC ----------
 IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @id             maxfield-send-portals@HiperionBR
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
@@ -668,7 +650,7 @@ with b4:
     TUTORIAL_IITC_URL = st.secrets.get("TUTORIAL_IITC_URL", TUTORIAL_URL)
     st.link_button("▶️ Tutorial (via IITC)", TUTORIAL_IITC_URL)
 
-# ---------- PWA Lite (manifest + SW via Blob) ----------
+# ---------- PWA Lite ----------
 st.markdown("""
 <script>
 try {
@@ -780,7 +762,8 @@ if "job_id" not in st.session_state:
         else:
             qp_set(job=None)
 
-# ---------- Processamento principal (SEM cache) ----------
+# ---------- Processamento principal (cache com TTL) ----------
+@st.cache_data(show_spinner=False, ttl=3600)
 def processar_plano(portal_bytes: bytes,
                     num_agents: int,
                     num_cpus: int,
@@ -800,28 +783,19 @@ def processar_plano(portal_bytes: bytes,
     with open(portal_path, "wb") as f:
         f.write(portal_bytes)
 
-    # ---- timestamps + info no log
     t0 = time.time()
     def t(msg): print(f"[{time.strftime('%H:%M:%S')}] {msg}")
-
-    # CPUs efetivas (clamp sensato)
-    num_cpus_eff = int(num_cpus)
-    if num_cpus_eff <= 0:
-        num_cpus_eff = min(os.cpu_count() or 1, 4)
-    else:
-        num_cpus_eff = max(1, min(num_cpus_eff, 8))
 
     log_buffer = io.StringIO()
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={num_cpus} · cpus_eff={num_cpus_eff} · "
-                  f"gif={fazer_gif} · csv={output_csv} · team={team}")
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · num_cpus={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
                 num_agents=int(num_agents),
-                num_cpus=int(num_cpus_eff),
+                num_cpus=int(num_cpus),
                 res_colors=res_colors,
                 google_api_key=(google_api_key or None),
                 google_api_secret=(google_api_secret or None),
@@ -837,9 +811,8 @@ def processar_plano(portal_bytes: bytes,
         log_buffer.write(f"\n[ERRO] {e}\n")
         raise
     finally:
-        pass  # buffer só será lido após ZIP
+        pass
 
-    # Compacta tudo do outdir
     zip_path = os.path.join(outdir, f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(outdir):
@@ -848,18 +821,15 @@ def processar_plano(portal_bytes: bytes,
                 fp = os.path.join(root, fn)
                 arc = os.path.relpath(fp, outdir)
                 z.write(fp, arcname=arc)
-    # fecha o marcador do ZIP no log
     with redirect_stdout(log_buffer):
         print(f"[{time.strftime('%H:%M:%S')}] ZIP pronto em {time.time()-t1:.1f}s; total {time.time()-t0:.1f}s")
 
     log_txt = log_buffer.getvalue()
 
-    # Salva log para o ZIP
     log_path = os.path.join(outdir, "maxfield_log.txt")
     with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
         lf.write(log_txt or "")
 
-    # lê artefatos
     def read_bytes(path):
         return open(path, "rb").read() if os.path.exists(path) else None
 
@@ -867,12 +837,11 @@ def processar_plano(portal_bytes: bytes,
     lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
     gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
 
-    # --- Plano resumido (arquivos locais para o ZIP) ---
     summary_md = []
     summary_md.append(f"# Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     summary_md.append(f"- **Job**: `{job_id}`")
     summary_md.append(f"- **Facção**: {'Resistance (azul)' if res_colors else 'Enlightened (verde)'}")
-    summary_md.append(f"- **Agentes**: {num_agents} · **CPUs**: {num_cpus_eff} · **CSV**: {output_csv} · **GIF**: {fazer_gif}")
+    summary_md.append(f"- **Agentes**: {num_agents} · **CPUs**: {num_cpus} · **CSV**: {output_csv} · **GIF**: {fazer_gif}")
     summary_md.append(f"- **Portais**: ver `portais.txt`")
     if os.path.exists(os.path.join(outdir, "portal_map.png")):
         summary_md.append(f"\n![Portal Map](portal_map.png)")
@@ -889,7 +858,7 @@ def processar_plano(portal_bytes: bytes,
 <h1>Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}</h1>
 <p><b>Job:</b> {job_id}<br>
 <b>Facção:</b> {"Resistance (azul)" if res_colors else "Enlightened (verde)"}<br>
-<b>Agentes:</b> {num_agents} · <b>CPUs:</b> {num_cpus_eff} · <b>CSV:</b> {output_csv} · <b>GIF:</b> {fazer_gif}</p>
+<b>Agentes:</b> {num_agents} · <b>CPUs:</b> {num_cpus} · <b>CSV:</b> {output_csv} · <b>GIF:</b> {fazer_gif}</p>
 <p>Portais: ver <code>portais.txt</code></p>
 {"<h2>Portal Map</h2><img src='portal_map.png'>" if os.path.exists(os.path.join(outdir,"portal_map.png")) else ""}
 {"<h2>Link Map</h2><img src='link_map.png'>" if os.path.exists(os.path.join(outdir,"link_map.png")) else ""}
@@ -911,7 +880,6 @@ def processar_plano(portal_bytes: bytes,
     }
 
 # ---------- UI Principal (tabs) ----------
-# adiciona a aba Fórum se habilitada
 ENABLE_FORUM = bool(st.secrets.get("ENABLE_FORUM", True))
 tabs = ["🧩 Gerar plano", "🕑 Histórico", "📊 Métricas"]
 if ENABLE_FORUM:
@@ -982,10 +950,8 @@ with tab_gen:
             help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente.",
             key="g_key"
         )
-        # renomeado para evitar conflito com a var final
         google_api_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
 
-        # NOVO: sem mapa (ignora Google Maps nessa execução)
         sem_mapa = st.checkbox(
             "Sem mapa de fundo (mais rápido/robusto)",
             value=False,
@@ -1018,7 +984,6 @@ with tab_gen:
 
         output_csv = (not st.session_state.get("fast_mode", False)) and bool(output_csv)
 
-        # aplica "Sem mapa de fundo"
         if sem_mapa:
             google_api_key = None
             google_api_secret = None
@@ -1026,10 +991,17 @@ with tab_gen:
             google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
             google_api_secret = (google_api_secret_input or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
 
+        eff_cpus = int(num_cpus)
+        if eff_cpus == 0:
+            try:
+                eff_cpus = min(3, os.cpu_count() or 2)
+            except Exception:
+                eff_cpus = 2
+
         kwargs = dict(
             portal_bytes=portal_bytes,
             num_agents=int(num_agents),
-            num_cpus=int(num_cpus),
+            num_cpus=int(eff_cpus),
             res_colors=res_colors,
             google_api_key=google_api_key,
             google_api_secret=google_api_secret,
@@ -1038,8 +1010,8 @@ with tab_gen:
             team=team
         )
 
-        eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team}
+        eta_s = estimate_eta_s(n_portais, int(eff_cpus), fazer_gif)
+        meta = {"n_portais": n_portais, "num_cpus": int(eff_cpus), "gif": fazer_gif, "team": team}
 
         st.session_state["_clear_text"] = True
         st.session_state["uploader_key"] += 1
@@ -1263,24 +1235,6 @@ with tab_hist:
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
 
-# ---------- MÉTRICAS ----------
-with tab_metrics:
-    conn = get_db()
-    cur = conn.execute("SELECT ts, n_portais, num_cpus, gif, dur_s FROM runs ORDER BY ts DESC LIMIT 100")
-    data = cur.fetchall()
-    if not data:
-        st.info("Ainda sem dados suficientes para métricas.")
-    else:
-        import pandas as pd
-        df = pd.DataFrame(data, columns=["ts","n_portais","num_cpus","gif","dur_s"])
-        p50 = float(df["dur_s"].quantile(0.50))
-        p90 = float(df["dur_s"].quantile(0.90))
-        st.metric("Duração p50 (s)", f"{int(p50)}")
-        st.metric("Duração p90 (s)", f"{int(p90)}")
-        st.metric("Execuções (últimos 100)", f"{len(df)}")
-        st.bar_chart(df[["dur_s"]].iloc[::-1], height=180)
-        st.caption("Barras (da mais antiga para a mais recente) mostram a duração por execução.")
-
 # ===================== FORUM / LOGIN =====================
 import hashlib
 
@@ -1417,7 +1371,6 @@ def get_user_by_token(token:str):
     row = cur.fetchone()
     if not row:
         return None
-    # atualiza last_seen
     conn.execute("UPDATE sessions SET last_seen_ts=? WHERE token=?", (_now_ts(), token))
     conn.commit()
     return {
@@ -1452,6 +1405,39 @@ def current_user():
             return u
     return None
 
+# ===== Helpers de AVATAR para fórum =====
+def _get_user_avatar_path_and_mime(user_id:int):
+    try:
+        cur = get_db().execute("SELECT avatar_ext FROM users WHERE id=? LIMIT 1", (int(user_id),))
+        row = cur.fetchone()
+        if not row: return None, None
+        ext = row[0]
+        if not ext: return None, None
+        p = os.path.join("data","avatars",str(int(user_id)), f"avatar{ext}")
+        if not os.path.exists(p): return None, None
+        mime = "image/png" if ext.lower()==".png" else ("image/webp" if ext.lower()==".webp" else "image/jpeg")
+        return p, mime
+    except Exception:
+        return None, None
+
+def avatar_img_tag(user_id:int, size:int=28) -> str:
+    p, mime = _get_user_avatar_path_and_mime(user_id)
+    if not p:
+        # Placeholder simples (círculo cinza)
+        return f"<span style='display:inline-block;width:{size}px;height:{size}px;border-radius:50%;background:#999;vertical-align:middle;margin-right:8px'></span>"
+    try:
+        b = open(p,"rb").read()
+        b64 = base64.b64encode(b).decode("ascii")
+        return f"<img src='data:{mime};base64,{b64}' style='width:{size}px;height:{size}px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:8px'/>"
+    except Exception:
+        return f"<span style='display:inline-block;width:{size}px;height:{size}px;border-radius:50%;background:#999;vertical-align:middle;margin-right:8px'></span>"
+
+def render_user_line_with_avatar(user_id:int, name:str, faction:str, dt_ts:int) -> str:
+    when = datetime.fromtimestamp(dt_ts).strftime('%Y-%m-%d %H:%M')
+    fac = faction or ""
+    return f"{avatar_img_tag(user_id, 28)}<strong>{name}</strong> · {fac or '—'} · {when}"
+
+# ===== Fórum: consultas =====
 def forum_count_comments(post_id:int) -> int:
     cur = get_db().execute("SELECT COUNT(*) FROM forum_comments WHERE post_id=? AND (deleted_ts IS NULL)", (int(post_id),))
     return int(cur.fetchone()[0])
@@ -1468,7 +1454,6 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
     row = cur.fetchone()
     post_id = int(row[0])
 
-    # salva imagens se houver
     saved = []
     if images:
         root = os.path.join("data","posts",str(post_id))
@@ -1492,8 +1477,9 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
     return post_id
 
 def forum_list_posts(cat:str):
+    # inclui author_id para renderizar avatar na listagem
     cur = get_db().execute("""
-        SELECT id, title, author_name, author_faction, created_ts, images_json
+        SELECT id, title, author_id, author_name, author_faction, created_ts, images_json
           FROM forum_posts
          WHERE cat=?
          ORDER BY is_pinned DESC, created_ts DESC
@@ -1528,13 +1514,10 @@ def forum_delete_comment(comment_id:int):
     get_db().execute("UPDATE forum_comments SET deleted_ts=? WHERE id=?", (_now_ts(), int(comment_id)))
     get_db().commit()
 
-def require_login_ui():
-    u = current_user()
-    if u:
-        return u
-
+# ---- Fórum UI (agora visível sem login) ----
+def login_ui_inline():
     st.subheader("Entrar / Criar conta")
-    with st.expander("Já tenho conta", expanded=True):
+    with st.expander("Já tenho conta", expanded=False):
         li_user = st.text_input("Usuário ou e-mail", key="li_user")
         li_pass = st.text_input("Senha", type="password", key="li_pass")
         if st.button("Entrar", key="li_btn"):
@@ -1575,7 +1558,6 @@ def require_login_ui():
                     else: av_ext=None
                 try:
                     uid = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
-                    # login automático
                     usr = get_user_by_username_or_email(su_user)
                     token = create_session(usr["id"])
                     st.session_state["user"] = usr
@@ -1587,9 +1569,6 @@ def require_login_ui():
                 except Exception as e:
                     st.error(f"Erro ao criar conta: {e}")
 
-    st.stop()
-
-# ---- Fórum UI ----
 if tab_forum is not None:
     with tab_forum:
         auto = st.toggle("🔄 Auto-atualizar a cada 20s", value=False, key="forum_auto")
@@ -1597,23 +1576,30 @@ if tab_forum is not None:
             st.markdown("<script>setTimeout(()=>location.reload(),20000)</script>", unsafe_allow_html=True)
 
         u = current_user()
-        if not u:
-            u = require_login_ui()
 
+        # Cabeçalho do usuário (ou login inline)
         with st.container(border=True):
-            colA, colB, colC = st.columns([0.7,0.3,0.3])
-            with colA:
-                st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
-            with colB:
-                if st.button("Sair", key="logout_btn"):
-                    signout_current()
-            with colC:
-                # avatar preview
-                av_ext = u.get("avatar_ext")
-                if av_ext:
-                    p = os.path.join("data","avatars",str(u["id"]), f"avatar{av_ext}")
-                    if os.path.exists(p):
-                        st.image(open(p,"rb").read(), caption="Seu avatar", width=64)
+            colA, colB, colC = st.columns([0.6,0.2,0.2])
+            if u:
+                with colA:
+                    line = render_user_line_with_avatar(u["id"], u["username"], u["faction"], _now_ts())
+                    st.markdown(line, unsafe_allow_html=True)
+                with colB:
+                    if st.button("Sair", key="logout_btn"):
+                        signout_current()
+                with colC:
+                    av_p, _ = _get_user_avatar_path_and_mime(u["id"])
+                    if av_p and os.path.exists(av_p):
+                        st.image(open(av_p,"rb").read(), caption="Seu avatar", width=64)
+            else:
+                with colA:
+                    st.write("Você está navegando como visitante. Faça login para postar e comentar.")
+                with colB:
+                    st.empty()
+                with colC:
+                    st.empty()
+        if not u:
+            login_ui_inline()
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1624,13 +1610,15 @@ if tab_forum is not None:
         for ci, ct in enumerate(cat_tabs):
             with ct:
                 cat = CATS[ci]
-                # Quem pode criar
-                can_create = (cat == "Atualizações" and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas"))
+                can_create = False
+                if u:
+                    can_create = (cat == "Atualizações" and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas"))
+
                 if can_create:
                     with st.expander("➕ Novo tópico", expanded=False):
                         nt_title = st.text_input("Título", key=f"nt_title_{cat}")
                         nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
-                        nt_imgs = st.file_uploader(f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)", type=["png","jpg","jpeg",".webp","webp"], accept_multiple_files=True, key=f"nt_imgs_{cat}")
+                        nt_imgs = st.file_uploader(f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True, key=f"nt_imgs_{cat}")
                         if st.button("Postar", key=f"nt_post_{cat}"):
                             if not nt_title.strip():
                                 st.error("Informe um título.")
@@ -1639,28 +1627,24 @@ if tab_forum is not None:
                                 st.success("Postagem enviada!")
                                 st.experimental_rerun()
                 else:
-                    st.caption("_Apenas admin pode publicar em Atualizações._")
+                    st.caption("_Faça login para criar um tópico._" if not u else ("_Apenas admin pode publicar em Atualizações._" if cat=="Atualizações" else ""))
 
-                # Lista de posts
+                # Lista de posts (visível para todos)
                 posts = forum_list_posts(cat)
                 if not posts:
                     st.info("Nenhum tópico ainda.")
                 else:
-                    for (pid, title, author_name, author_faction, cts, images_json) in posts:
+                    for (pid, title, author_id, author_name, author_faction, cts, images_json) in posts:
                         cnt = forum_count_comments(pid)
                         with st.container(border=True):
-                            cols = st.columns([0.75,0.25])
-                            with cols[0]:
-                                dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
-                                st.markdown(f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br><small>por {author_name} · {author_faction} · {dt}</small>", unsafe_allow_html=True)
-                            with cols[1]:
-                                if u["is_admin"]==1:
-                                    if st.button("Apagar tópico", key=f"del_post_{pid}"):
-                                        get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
-                                        get_db().execute("DELETE FROM forum_comments WHERE post_id=?", (int(pid),))
-                                        get_db().commit()
-                                        st.success("Tópico removido.")
-                                        st.experimental_rerun()
+                            top_cols = st.columns([0.85,0.15])
+                            with top_cols[0]:
+                                # Linha com avatar + autor + data
+                                header_html = f"{avatar_img_tag(author_id, 28)}<strong>{title}</strong><br><small>{(author_name or '—')} · {(author_faction or '—')} · {datetime.fromtimestamp(cts).strftime('%Y-%m-%d %H:%M')}</small>"
+                                st.markdown(header_html, unsafe_allow_html=True)
+                            with top_cols[1]:
+                                st.markdown(f"<div style='text-align:right'><span class='mf-badge'>{cnt} comentários</span></div>", unsafe_allow_html=True)
+
                             # conteúdo e imagens
                             post = forum_get_post(pid)
                             if post:
@@ -1680,7 +1664,8 @@ if tab_forum is not None:
                                         if os.path.exists(p):
                                             with ig_cols[i % len(ig_cols)]:
                                                 st.image(open(p,"rb").read())
-                            # comentários
+
+                            # comentários (visíveis a todos)
                             if COMMENTS_ENABLED:
                                 st.markdown("**Comentários:**")
                                 comms = forum_list_comments(pid)
@@ -1691,27 +1676,29 @@ if tab_forum is not None:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
-                                        line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}"
-                                        colc1, colc2 = st.columns([0.85,0.15])
-                                        with colc1:
-                                            st.markdown(line)
+                                        row = st.columns([0.90,0.10])
+                                        with row[0]:
+                                            st.markdown(render_user_line_with_avatar(caid, caname, cafac, ctime), unsafe_allow_html=True)
                                             if cbody:
                                                 st.markdown(cbody)
-                                        with colc2:
-                                            if u["is_admin"]==1 or int(u["id"])==int(caid):
+                                        with row[1]:
+                                            if u and (u["is_admin"]==1 or int(u["id"])==int(caid)):
                                                 if st.button("🗑️ Apagar", key=f"delc_{cid}"):
                                                     forum_delete_comment(cid)
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
-                                # novo comentário
-                                nc = st.text_area("Escreva um comentário", key=f"nc_{pid}", height=100)
-                                if st.button("Comentar", key=f"btn_nc_{pid}"):
-                                    if not nc.strip():
-                                        st.error("O comentário está vazio.")
-                                    else:
-                                        forum_add_comment(pid, u, nc)
-                                        st.success("Comentário publicado!")
-                                        st.experimental_rerun()
+                                # novo comentário (apenas logado)
+                                if u:
+                                    nc = st.text_area("Escreva um comentário", key=f"nc_{pid}", height=100)
+                                    if st.button("Comentar", key=f"btn_nc_{pid}"):
+                                        if not nc.strip():
+                                            st.error("O comentário está vazio.")
+                                        else:
+                                            forum_add_comment(pid, u, nc)
+                                            st.success("Comentário publicado!")
+                                            st.experimental_rerun()
+                                else:
+                                    st.caption("_Faça login para comentar._")
                             else:
                                 st.caption("_Comentários desabilitados._")
 
