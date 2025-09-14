@@ -9,7 +9,7 @@ import time
 import statistics
 import uuid
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 
@@ -33,7 +33,7 @@ st.set_page_config(
     layout="centered",
 )
 
-# ===== Fundo + cartão responsivo (claro/escuro automático) =====
+# ===== Fundo + cartão responsivo (claro/escuro automático) + Abas grandes =====
 bg_url = st.secrets.get("BG_URL", "").strip()
 st.markdown(
     f"""
@@ -62,7 +62,7 @@ st.markdown(
       padding: 1rem 1.2rem 2rem 1.2rem;
     }}
 
-    /* Chips de cor de facção (preview) */
+    /* Chips de facção */
     .mf-chip {{
       display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;margin-right:8px;
       color:#fff; box-shadow:0 2px 6px rgba(0,0,0,.2)
@@ -76,40 +76,17 @@ st.markdown(
       background:#00000022;
     }}
 
-    /* ===== Tabs principais mais destacadas ===== */
-    .stTabs [role="tablist"]{{
-      gap: 10px;
-      border-bottom: none;
-    }}
-    .stTabs [role="tab"]{{
-      font-weight: 600;
-      font-size: 15px;
-      padding: 10px 16px;
+    /* Abas grandes (pill buttons) */
+    div[data-baseweb="tab-list"] button {{
+      padding: 12px 18px !important;
+      margin: 0 6px 8px 0 !important;
       border-radius: 999px !important;
-      border: 1px solid rgba(0,0,0,.10);
-      background: rgba(255,255,255,.75);
-      box-shadow: 0 1px 2px rgba(0,0,0,.08);
-      transition: transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
+      border: 1px solid rgba(0,0,0,.08) !important;
+      box-shadow: 0 2px 6px rgba(0,0,0,.06) !important;
+      font-weight: 600 !important;
     }}
-    .stTabs [role="tab"]:hover{{
-      transform: translateY(-1px);
-      box-shadow: 0 6px 18px rgba(0,0,0,.12);
-    }}
-    .stTabs [role="tab"][aria-selected="true"]{{
-      background: linear-gradient(180deg, rgba(46,170,220,.12), rgba(46,170,220,.06));
-      border-color: rgba(46,170,220,.35);
-    }}
-    @media (prefers-color-scheme: dark){{
-      .stTabs [role="tab"]{{
-        background: rgba(255,255,255,.08);
-        border-color: rgba(255,255,255,.18);
-        color: #eaeaea;
-      }}
-      .stTabs [role="tab"][aria-selected="true"]{{
-        background: linear-gradient(180deg, rgba(46,170,220,.28), rgba(46,170,220,.14));
-        border-color: rgba(46,170,220,.55);
-        color: #fff;
-      }}
+    div[data-baseweb="tab"] p {{
+      font-size: 15px !important;
     }}
     </style>
     """,
@@ -160,35 +137,24 @@ def get_db():
 
     # --- Fórum + usuários + sessões ---
     conn.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT)")
-    def colset(table):
-        return {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
+    def colset(table): return {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
     def ensure_col(table, col, decl):
         if col not in colset(table):
-            try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-            except Exception:
-                pass
+            try: conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            except Exception: pass
 
     for col, decl in [
-        ("username", "TEXT"),
-        ("username_lc", "TEXT"),
-        ("pass_hash", "TEXT"),
-        ("pass_salt", "TEXT"),
-        ("faction", "TEXT"),
-        ("email", "TEXT"),
-        ("avatar_ext", "TEXT"),
-        ("is_admin", "INTEGER DEFAULT 0"),
-        ("created_ts", "INTEGER"),
-        ("updated_ts", "INTEGER"),
-        ("uid", "TEXT"),
-        ("name", "TEXT"),
-        ("avatar_path", "TEXT"),
-    ]:
-        ensure_col("users", col, decl)
+        ("username","TEXT"),("username_lc","TEXT"),
+        ("pass_hash","TEXT"),("pass_salt","TEXT"),
+        ("faction","TEXT"),("email","TEXT"),
+        ("avatar_ext","TEXT"),("is_admin","INTEGER DEFAULT 0"),
+        ("created_ts","INTEGER"),("updated_ts","INTEGER"),
+        # legados
+        ("uid","TEXT"),("name","TEXT"),("avatar_path","TEXT"),
+    ]: ensure_col("users", col, decl)
     try:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lc ON users(username_lc)")
-    except Exception:
-        pass
+    except Exception: pass
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions(
@@ -202,39 +168,24 @@ def get_db():
 
     conn.execute("CREATE TABLE IF NOT EXISTS forum_posts(id INTEGER PRIMARY KEY AUTOINCREMENT)")
     for col, decl in [
-        ("cat", "TEXT"),
-        ("title", "TEXT"),
-        ("body_md", "TEXT"),
-        ("author_id", "INTEGER"),
-        ("author_name", "TEXT"),
-        ("author_faction", "TEXT"),
-        ("created_ts", "INTEGER"),
-        ("updated_ts", "INTEGER"),
-        ("images_json", "TEXT"),
-        ("is_pinned", "INTEGER DEFAULT 0"),
-        ("ts", "INTEGER"),
-        ("uid", "TEXT"),
-        ("body", "TEXT"),
-        ("category", "TEXT"),
-    ]:
-        ensure_col("forum_posts", col, decl)
+        ("cat","TEXT"),("title","TEXT"),("body_md","TEXT"),
+        ("author_id","INTEGER"),("author_name","TEXT"),("author_faction","TEXT"),
+        ("created_ts","INTEGER"),("updated_ts","INTEGER"),
+        ("images_json","TEXT"),("is_pinned","INTEGER DEFAULT 0"),
+        # legados
+        ("ts","INTEGER"),("uid","TEXT"),("body","TEXT"),("category","TEXT"),
+    ]: ensure_col("forum_posts", col, decl)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_cat ON forum_posts(cat)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON forum_posts(author_id)")
 
     conn.execute("CREATE TABLE IF NOT EXISTS forum_comments(id INTEGER PRIMARY KEY AUTOINCREMENT)")
     for col, decl in [
-        ("post_id", "INTEGER"),
-        ("author_id", "INTEGER"),
-        ("author_name", "TEXT"),
-        ("author_faction", "TEXT"),
-        ("body_md", "TEXT"),
-        ("created_ts", "INTEGER"),
-        ("deleted_ts", "INTEGER"),
-        ("ts", "INTEGER"),
-        ("uid", "TEXT"),
-        ("body", "TEXT"),
-    ]:
-        ensure_col("forum_comments", col, decl)
+        ("post_id","INTEGER"),("author_id","INTEGER"),
+        ("author_name","TEXT"),("author_faction","TEXT"),
+        ("body_md","TEXT"),("created_ts","INTEGER"),("deleted_ts","INTEGER"),
+        # legados
+        ("ts","INTEGER"),("uid","TEXT"),("body","TEXT"),
+    ]: ensure_col("forum_comments", col, decl)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_postid ON forum_comments(post_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON forum_comments(author_id)")
 
@@ -251,6 +202,7 @@ def get_metric(key: str) -> int:
     row = cur.fetchone()
     return int(row[0]) if row else 0
 
+# histórico de durações p/ ETA
 def record_run(n_portais:int, num_cpus:int, gif:bool, dur_s:float):
     conn = get_db()
     conn.execute("INSERT INTO runs(ts,n_portais,num_cpus,gif,dur_s) VALUES (?,?,?,?,?)",
@@ -338,6 +290,7 @@ def daily_cleanup(retain_hours:int=24):
 
 daily_cleanup(retain_hours=24)
 
+# Conta visita 1x por sessão
 if "visit_counted" not in st.session_state:
     inc_metric("visits", 1)
     st.session_state["visit_counted"] = True
@@ -370,13 +323,13 @@ def extract_points(texto: str):
             if "pll=" in url:
                 pll = url.split("pll=")[1].split("&")[0]
                 lat_s, lon_s = pll.split(",")
-                lat = float(lat_s)
-                lon = float(lon_s)
+                lat = float(lat_s); lon = float(lon_s)
                 pts.append({"name": name or "Portal", "lat": lat, "lon": lon})
         except Exception:
             continue
     return pts
 
+# ---------- Helpers de QueryString ----------
 def qp_get(name: str, default: str = "") -> str:
     try:
         params = getattr(st, "query_params", None)
@@ -418,14 +371,15 @@ if "uid" not in st.session_state:
     st.session_state["uid"] = cur_uid
 UID = st.session_state["uid"]
 
-# ---------- Userscript params ----------
+# ---------- Parâmetros públicos userscript ----------
 PUBLIC_URL = (st.secrets.get("PUBLIC_URL", "https://maxfield.fun/").rstrip("/") + "/")
 MIN_ZOOM = int(st.secrets.get("MIN_ZOOM", 15))
 MAX_PORTALS = int(st.secrets.get("MAX_PORTALS", 200))
 MAX_URL_LEN = int(st.secrets.get("MAX_URL_LEN", 6000))
+
 DEST = PUBLIC_URL
 
-# ---------- Exemplo ----------
+# ---------- Exemplo de entrada (.txt) ----------
 EXEMPLO_TXT = """# Exemplo de arquivo de portais (uma linha por portal)
 # Formato: Nome do Portal; URL do Intel (com pll=LAT,LON)
 Portal 1; https://intel.ingress.com/intel?pll=-10.912345,-37.065432
@@ -433,7 +387,7 @@ Portal 2; https://intel.ingress.com/intel?pll=-10.913210,-37.061234
 Portal 3; https://intel.ingress.com/intel?pll=-10.910987,-37.060001
 """
 
-# ---------- Userscript IITC ----------
+# ---------- Userscript IITC (polido) ----------
 IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @id             maxfield-send-portals@HiperionBR
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
@@ -450,12 +404,10 @@ function wrapper(plugin_info) {
   window.plugin.maxfieldSender = {};
   const self = window.plugin.maxfieldSender;
 
-  // ===== Config =====
   self.MIN_ZOOM    = 15;
   self.MAX_PORTALS = 200;
   self.MAX_URL_LEN = 6000;
   self.DEST        = '__DEST__';
-  // ==================
 
   const isMobile = /IITC|Android|Mobile/i.test(navigator.userAgent) || !!window.isApp;
 
@@ -561,10 +513,10 @@ function wrapper(plugin_info) {
   self.copyListOnly = async function(){
     const lines = self.visiblePortals();
     selfupdateCounter(lines.length);
-    if (!lines.length) {
+    if (!lines.length) {{
       alert('Nenhum portal visível para copiar.');
       return;
-    }
+    }}
     const text = lines.slice(0, self.MAX_PORTALS).join('\\n');
     await self.copy(text);
     alert('Lista copiada! Agora cole no campo de texto do Maxfield.');
@@ -601,13 +553,13 @@ function wrapper(plugin_info) {
     const box = document.createElement('div');
     box.id = 'mf-send-btn-float';
     box.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:99999;display:flex;gap:8px';
-    const mk = (label, cb) => {
+    const mk = (label, cb) => {{
       const btn = document.createElement('a');
       btn.textContent = label;
       btn.style.cssText = 'padding:6px 10px;background:#2b8;color:#fff;border-radius:4px;font:12px/1.3 sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
-      btn.addEventListener('click', function(e){ e.preventDefault(); cb(); });
+      btn.addEventListener('click', function(e){{ e.preventDefault(); cb(); }});
       return btn;
-    };
+    }};
     box.appendChild(mk('Send to Maxfield', self.send));
     box.appendChild(mk('Copiar lista (txt)', self.copyListOnly));
     (document.body || document.documentElement).appendChild(box);
@@ -631,11 +583,10 @@ function wrapper(plugin_info) {
   if (window.iitcLoaded) setup(); else window.addHook('iitcLoaded', setup);
 }
 
-// injeta no contexto da página (padrão IITC)
 const script = document.createElement('script');
 const info = {};
 if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
-  info.script = { version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description };
+  info.script = {{ version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description }};
 }
 script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
 (document.body || document.documentElement).appendChild(script);
@@ -822,7 +773,7 @@ def processar_plano(portal_bytes: bytes,
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={num_cpus} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={st.session_state.get('num_cpus',0) if 'num_cpus' in st.session_state else 0} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
@@ -869,6 +820,7 @@ def processar_plano(portal_bytes: bytes,
     lm_bytes = read_bytes(os.path.join(outdir, "link_map.png"))
     gif_bytes = read_bytes(os.path.join(outdir, "plan_movie.gif"))
 
+    # mini summary salvo em arquivos (sem botões)
     summary_md = []
     summary_md.append(f"# Plano Maxfield — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     summary_md.append(f"- **Job**: `{job_id}`")
@@ -923,6 +875,7 @@ tab_hist = tab_objs[1]
 tab_metrics = tab_objs[2]
 tab_forum = tab_objs[3] if ENABLE_FORUM else None
 
+# ====== TAB: GERAR PLANO ======
 with tab_gen:
     st.markdown('<span class="mf-chip enl">Enlightened</span><span class="mf-chip res">Resistance</span>', unsafe_allow_html=True)
 
@@ -1004,8 +957,23 @@ with tab_gen:
             texto_portais = st.session_state["txt_content"]
 
         texto_portais = clean_invisibles(texto_portais)
-        portal_bytes = texto_portais.encode("utf-8")
 
+        # limite server-side de portais
+        MAX_PORTALS_SERVER = int(st.secrets.get("MAX_PORTALS", 200))
+        linhas = texto_portais.splitlines()
+        count = 0; kept = []
+        for ln in linhas:
+            s = ln.strip()
+            if s and not s.startswith("#"):
+                count += 1
+                if count > MAX_PORTALS_SERVER:
+                    continue
+            kept.append(ln)
+        if count > MAX_PORTALS_SERVER:
+            st.warning(f"Lista com {count} portais; usando apenas os primeiros {MAX_PORTALS_SERVER}.")
+            texto_portais = "\n".join(kept)
+
+        portal_bytes = texto_portais.encode("utf-8")
         res_colors = team.startswith("Resistance")
         n_portais = contar_portais(texto_portais)
 
@@ -1019,14 +987,20 @@ with tab_gen:
         if sem_mapa:
             google_api_key = None
             google_api_secret = None
+            os.environ["MAXFIELD_DISABLE_BASEMAP"] = "1"
         else:
+            os.environ.pop("MAXFIELD_DISABLE_BASEMAP", None)
             google_api_key = (google_key_input or "").strip() or st.secrets.get("GOOGLE_API_KEY", None)
             google_api_secret = (google_api_secret_input or "").strip() or st.secrets.get("GOOGLE_API_SECRET", None)
+
+        eff_cpus = int(num_cpus)
+        if eff_cpus == 0:
+            eff_cpus = min(4, os.cpu_count() or 2)
 
         kwargs = dict(
             portal_bytes=portal_bytes,
             num_agents=int(num_agents),
-            num_cpus=int(num_cpus),
+            num_cpus=int(eff_cpus),
             res_colors=res_colors,
             google_api_key=google_api_key,
             google_api_secret=google_api_secret,
@@ -1035,8 +1009,8 @@ with tab_gen:
             team=team
         )
 
-        eta_s = estimate_eta_s(n_portais, int(num_cpus), fazer_gif)
-        meta = {"n_portais": n_portais, "num_cpus": int(num_cpus), "gif": fazer_gif, "team": team}
+        eta_s = estimate_eta_s(n_portais, int(eff_cpus), fazer_gif)
+        meta = {"n_portais": n_portais, "num_cpus": int(eff_cpus), "gif": fazer_gif, "team": team}
 
         st.session_state["_clear_text"] = True
         st.session_state["uploader_key"] += 1
@@ -1179,7 +1153,6 @@ if res:
             mime="image/gif",
             key="dl_gif_last",
         )
-
     st.download_button(
         "Baixar todos os arquivos (.zip)",
         data=res["zip_bytes"],
@@ -1187,7 +1160,6 @@ if res:
         mime="application/zip",
         key="dl_zip_last",
     )
-
     with st.expander("Ver logs do processamento"):
         log_txt_full = res.get("log_txt") or "(sem logs)"
         if len(log_txt_full) > 20000:
@@ -1196,7 +1168,6 @@ if res:
         else:
             log_txt = log_txt_full
         st.code(log_txt, language="bash")
-
     if st.button("🧹 Limpar resultados", key="clear_res"):
         st.session_state.pop("last_result", None)
         qp_set(job=None)
@@ -1223,42 +1194,40 @@ with tab_hist:
                     cols = st.columns(4)
                     if os.path.exists(pm):
                         with cols[0]:
-                            st.download_button(
-                                "Portal Map",
-                                data=open(pm,"rb").read(),
-                                file_name="portal_map.png",
-                                mime="image/png",
-                                key=f"dl_pm_{jid}",
-                            )
+                            st.download_button("Portal Map", data=open(pm,"rb").read(),
+                                               file_name="portal_map.png", mime="image/png", key=f"dl_pm_{jid}")
                     if os.path.exists(lm):
                         with cols[1]:
-                            st.download_button(
-                                "Link Map",
-                                data=open(lm,"rb").read(),
-                                file_name="link_map.png",
-                                mime="image/png",
-                                key=f"dl_lm_{jid}",
-                            )
+                            st.download_button("Link Map", data=open(lm,"rb").read(),
+                                               file_name="link_map.png", mime="image/png", key=f"dl_lm_{jid}")
                     if os.path.exists(gif_p):
                         with cols[2]:
-                            st.download_button(
-                                "GIF",
-                                data=open(gif_p,"rb").read(),
-                                file_name="plan_movie.gif",
-                                mime="image/gif",
-                                key=f"dl_gif_{jid}",
-                            )
+                            st.download_button("GIF", data=open(gif_p,"rb").read(),
+                                               file_name="plan_movie.gif", mime="image/gif", key=f"dl_gif_{jid}")
                     if zip_p and os.path.exists(zip_p):
                         with cols[3]:
-                            st.download_button(
-                                "ZIP",
-                                data=open(zip_p,"rb").read(),
-                                file_name=os.path.basename(zip_p),
-                                mime="application/zip",
-                                key=f"dl_zip_{jid}",
-                            )
+                            st.download_button("ZIP", data=open(zip_p,"rb").read(),
+                                               file_name=os.path.basename(zip_p), mime="application/zip", key=f"dl_zip_{jid}")
                 else:
                     st.caption("_Arquivos expirados pela limpeza diária._")
+
+# ---------- MÉTRICAS ----------
+with tab_metrics:
+    conn = get_db()
+    cur = conn.execute("SELECT ts, n_portais, num_cpus, gif, dur_s FROM runs ORDER BY ts DESC LIMIT 100")
+    data = cur.fetchall()
+    if not data:
+        st.info("Ainda sem dados suficientes para métricas.")
+    else:
+        import pandas as pd
+        df = pd.DataFrame(data, columns=["ts","n_portais","num_cpus","gif","dur_s"])
+        p50 = float(df["dur_s"].quantile(0.50))
+        p90 = float(df["dur_s"].quantile(0.90))
+        st.metric("Duração p50 (s)", f"{int(p50)}")
+        st.metric("Duração p90 (s)", f"{int(p90)}")
+        st.metric("Execuções (últimos 100)", f"{len(df)}")
+        st.bar_chart(df[["dur_s"]].iloc[::-1], height=180)
+        st.caption("Barras (da mais antiga para a mais recente) mostram a duração por execução.")
 
 # ===================== FORUM / LOGIN =====================
 import hashlib
@@ -1279,8 +1248,7 @@ def save_avatar_file(user_id: int, avatar_bytes: bytes|None, avatar_ext: str|Non
     if not avatar_bytes or not avatar_ext:
         return None
     safe_ext = avatar_ext.lower().strip()
-    if not safe_ext.startswith("."):
-        safe_ext = "." + safe_ext
+    if not safe_ext.startswith("."): safe_ext = "." + safe_ext
     if safe_ext not in (".png", ".jpg", ".jpeg", ".webp"):
         return None
     av_dir = os.path.join("data", "avatars", str(int(user_id)))
@@ -1375,7 +1343,8 @@ def check_password(user_row: dict, password: str) -> bool:
     ph, psalt = row[0] or "", (row[1] or "")
     if psalt:
         return hash_pass(password, psalt) == ph
-    return hashlib.sha256(password.encode("utf-8","ignore")).hexdigest() == ph
+    import hashlib as _h
+    return _h.sha256(password.encode("utf-8","ignore")).hexdigest() == ph
 
 def create_session(user_id:int) -> str:
     token = uuid.uuid4().hex
@@ -1458,8 +1427,7 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
             ext = ".png"
             for e in (".png",".jpg",".jpeg",".webp"):
                 if name.endswith(e):
-                    ext = e
-                    break
+                    ext = e; break
             p = os.path.join(root, f"img{i}{ext}")
             with open(p,"wb") as out:
                 out.write(data)
@@ -1470,7 +1438,7 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
 
 def forum_list_posts(cat:str):
     cur = get_db().execute("""
-        SELECT id, title, author_id, author_name, author_faction, created_ts, images_json
+        SELECT id, title, author_name, author_faction, created_ts, images_json, author_id
           FROM forum_posts
          WHERE cat=?
          ORDER BY is_pinned DESC, created_ts DESC
@@ -1505,18 +1473,12 @@ def forum_delete_comment(comment_id:int):
     get_db().execute("UPDATE forum_comments SET deleted_ts=? WHERE id=?", (_now_ts(), int(comment_id)))
     get_db().commit()
 
-# helper: avatar bytes por user_id
-def get_avatar_bytes_by_user_id(user_id:int):
-    try:
-        cur = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(user_id),))
-        r = cur.fetchone()
-        av_ext = r[0] if r and r[0] else None
-        if av_ext:
-            ap = os.path.join("data","avatars",str(int(user_id)), f"avatar{av_ext}")
-            if os.path.exists(ap):
-                return open(ap,"rb").read()
-    except Exception:
-        return None
+def user_avatar_bytes(user_id:int, avatar_ext:str|None):
+    if not avatar_ext: return None
+    p = os.path.join("data","avatars",str(user_id), f"avatar{avatar_ext}")
+    if os.path.exists(p):
+        try: return open(p,"rb").read()
+        except: return None
     return None
 
 # ---- Fórum UI ----
@@ -1526,30 +1488,18 @@ if tab_forum is not None:
         if auto:
             st.markdown("<script>setTimeout(()=>location.reload(),20000)</script>", unsafe_allow_html=True)
 
-        u = current_user()  # pode ser None
+        u = current_user()
 
-        # Cabeçalho do fórum
-        with st.container(border=True):
-            colA, colB = st.columns([0.7,0.3])
-            with colA:
-                if u:
-                    st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
-                else:
-                    st.write("Você está navegando como visitante. Entre para comentar/postar.")
-            with colB:
-                if u:
-                    if st.button("Sair", key="logout_btn"):
-                        signout_current()
-
-        # LOGIN/REGISTRO (visitante)
-        def render_login_boxes_top():
-            with st.expander("Entrar / Criar conta", expanded=False):
+        # Banner visitante + login compacto (antes da lista de tópicos)
+        if not u:
+            st.info("Você está navegando como **visitante**. Entre para comentar/postar.")
+            with st.container(border=True):
                 colL, colR = st.columns(2)
                 with colL:
-                    st.markdown("**Já tenho conta**")
-                    li_user = st.text_input("Usuário ou e-mail", key="li_user_top")
-                    li_pass = st.text_input("Senha", type="password", key="li_pass_top")
-                    if st.button("Entrar", key="li_btn_top"):
+                    st.markdown("#### Entrar")
+                    li_user = st.text_input("Usuário ou e-mail", key="li_user")
+                    li_pass = st.text_input("Senha", type="password", key="li_pass")
+                    if st.button("Entrar", key="li_btn"):
                         usr = get_user_by_username_or_email(li_user)
                         if not usr or not check_password(usr, li_pass):
                             st.error("Usuário ou senha inválidos.")
@@ -1561,15 +1511,15 @@ if tab_forum is not None:
                             except: pass
                             st.experimental_rerun()
                 with colR:
-                    st.markdown("**Criar nova conta**")
-                    su_user = st.text_input("Nome de usuário (único)", key="su_user_top")
-                    su_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key="su_faction_top")
-                    su_email = st.text_input("E-mail (opcional)", key="su_email_top")
-                    su_pass = st.text_input("Senha", type="password", key="su_pass_top")
-                    su_pass2 = st.text_input("Confirmar senha", type="password", key="su_pass2_top")
-                    su_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key="su_avatar_top")
-                    su_admin_code = st.text_input("Código de admin (deixe vazio se não for admin)", type="password", key="su_admin_code_top")
-                    if st.button("Criar conta", key="su_btn_top"):
+                    st.markdown("#### Criar conta")
+                    su_user = st.text_input("Nome de usuário (único)", key="su_user")
+                    su_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key="su_faction")
+                    su_email = st.text_input("E-mail (opcional)", key="su_email")
+                    su_pass = st.text_input("Senha", type="password", key="su_pass")
+                    su_pass2 = st.text_input("Confirmar senha", type="password", key="su_pass2")
+                    su_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key="su_avatar")
+                    su_admin_code = st.text_input("Código de admin (se houver)", type="password", key="su_admin_code")
+                    if st.button("Criar conta", key="su_btn"):
                         if not su_user or not su_pass:
                             st.error("Preencha usuário e senha.")
                         elif su_pass != su_pass2:
@@ -1585,7 +1535,7 @@ if tab_forum is not None:
                                 elif n.endswith(".webp"): av_ext=".webp"
                                 else: av_ext=None
                             try:
-                                uid = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
+                                uid_new = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
                                 usr = get_user_by_username_or_email(su_user)
                                 token = create_session(usr["id"])
                                 st.session_state["user"] = usr
@@ -1596,9 +1546,18 @@ if tab_forum is not None:
                                 st.error(str(ve))
                             except Exception as e:
                                 st.error(f"Erro ao criar conta: {e}")
-
-        if not u:
-            render_login_boxes_top()
+        else:
+            with st.container(border=True):
+                colA, colB, colC = st.columns([0.7,0.2,0.1])
+                with colA:
+                    st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
+                with colB:
+                    if st.button("Sair", key="logout_btn"):
+                        signout_current()
+                with colC:
+                    av_bytes = user_avatar_bytes(u["id"], u.get("avatar_ext"))
+                    if av_bytes:
+                        st.image(av_bytes, caption="", width=64)
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1609,83 +1568,89 @@ if tab_forum is not None:
         for ci, ct in enumerate(cat_tabs):
             with ct:
                 cat = CATS[ci]
+                can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
-                # estado controlado do expander + nonce do uploader (para reset)
-                exp_key = f"exp_new_topic_open_{cat}"
+                # ===== NOVO: Criar tópico via cartão controlado por estado (fecha/limpa ao postar) =====
+                exp_key = f"new_topic_open_{cat}"
                 if exp_key not in st.session_state:
-                    st.session_state[exp_key] = False  # começa fechado
+                    st.session_state[exp_key] = False
                 nonce_key = f"nt_uploader_nonce_{cat}"
                 if nonce_key not in st.session_state:
                     st.session_state[nonce_key] = 0
 
-                can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
-
                 if can_create:
-                    with st.expander("➕ Novo tópico", expanded=st.session_state[exp_key]):
-                        nt_title = st.text_input("Título", key=f"nt_title_{cat}")
-                        nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
-                        nt_imgs = st.file_uploader(
-                            f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)",
-                            type=["png","jpg","jpeg","webp"],
-                            accept_multiple_files=True,
-                            key=f"nt_imgs_{cat}_{st.session_state[nonce_key]}",
-                        )
-                        if st.button("Postar", key=f"nt_post_{cat}"):
-                            if not nt_title.strip():
-                                st.error("Informe um título.")
-                            else:
-                                # pega os arquivos do uploader atual (com a key com nonce)
-                                images = st.session_state.get(f"nt_imgs_{cat}_{st.session_state[nonce_key]}", None)
-                                pid = forum_create_post(cat, nt_title, nt_body, images, u)
+                    if not st.session_state[exp_key]:
+                        if st.button("➕ Novo tópico", key=f"open_new_topic_{cat}"):
+                            st.session_state[exp_key] = True
+                            st.experimental_rerun()
+                    else:
+                        with st.container(border=True):
+                            st.markdown("### ➕ Novo tópico")
+                            nt_title = st.text_input("Título", key=f"nt_title_{cat}")
+                            nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
+                            nt_imgs = st.file_uploader(
+                                f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)",
+                                type=["png","jpg","jpeg","webp"],
+                                accept_multiple_files=True,
+                                key=f"nt_imgs_{cat}_{st.session_state[nonce_key]}",
+                            )
+                            col_btns = st.columns([0.2,0.2,0.6])
+                            post_clicked   = col_btns[0].button("Postar",   key=f"nt_post_{cat}")
+                            cancel_clicked = col_btns[1].button("Cancelar", key=f"nt_cancel_{cat}")
 
-                                # limpa campos, fecha expander e reseta uploader
+                            if cancel_clicked:
                                 for _k in (f"nt_title_{cat}", f"nt_body_{cat}"):
-                                    try: st.session_state.pop(_k, None)
-                                    except Exception: pass
-                                st.session_state[nonce_key] += 1  # muda a key do uploader -> limpa
+                                    st.session_state.pop(_k, None)
+                                st.session_state[nonce_key] += 1
                                 st.session_state[exp_key] = False
-
-                                st.toast("Postagem enviada!")
-                                st.success("Postagem enviada!")
+                                st.toast("Criação cancelada.")
                                 st.experimental_rerun()
+
+                            if post_clicked:
+                                if not nt_title.strip():
+                                    st.error("Informe um título.")
+                                else:
+                                    forum_create_post(cat, nt_title, nt_body, nt_imgs, u)
+                                    for _k in (f"nt_title_{cat}", f"nt_body_{cat}"):
+                                        st.session_state.pop(_k, None)
+                                    st.session_state[nonce_key] += 1
+                                    st.session_state[exp_key] = False
+                                    st.toast("Postagem enviada!")
+                                    st.success("Postagem enviada!")
+                                    st.experimental_rerun()
                 else:
                     if not u:
                         st.caption("_Entre para criar um novo tópico._")
-                    elif cat == "Atualizações" and u and u["is_admin"] != 1:
+                    elif cat == "Atualizações" and u and u['is_admin'] != 1:
                         st.caption("_Apenas admin pode publicar em Atualizações._")
 
-                # Lista de posts (com avatar do autor)
+                # ===== Lista de posts =====
                 posts = forum_list_posts(cat)
                 if not posts:
                     st.info("Nenhum tópico ainda.")
                 else:
-                    for (pid, title, author_id, author_name, author_faction, cts, images_json) in posts:
+                    for (pid, title, author_name, author_faction, cts, images_json, author_id) in posts:
                         cnt = forum_count_comments(pid)
+                        # avatar do autor ao lado do cabeçalho do post
+                        user_row = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(author_id),)).fetchone()
+                        av_ext = user_row[0] if user_row else None
+                        av_bytes = user_avatar_bytes(author_id, av_ext)
                         with st.container(border=True):
-                            cols = st.columns([0.10, 0.70, 0.20])  # avatar | texto | ações
-                            with cols[0]:
-                                avb = get_avatar_bytes_by_user_id(author_id)
-                                if avb:
-                                    st.image(avb, width=48)
-                                else:
-                                    st.markdown("<div style='width:48px;height:48px;border-radius:50%;background:#999;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;'>👤</div>", unsafe_allow_html=True)
-                            with cols[1]:
+                            head_cols = st.columns([0.1,0.65,0.25])
+                            with head_cols[0]:
+                                if av_bytes:
+                                    st.image(av_bytes, width=48)
+                            with head_cols[1]:
                                 dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
-                                st.markdown(
-                                    f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br>"
-                                    f"<small>por {author_name} · {author_faction} · {dt}</small>",
-                                    unsafe_allow_html=True
-                                )
-                            with cols[2]:
-                                if u and u["is_admin"]==1:
+                                st.markdown(f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br><small>por {author_name} · {author_faction} · {dt}</small>", unsafe_allow_html=True)
+                            with head_cols[2]:
+                                if u and u.get("is_admin",0)==1:
                                     if st.button("Apagar tópico", key=f"del_post_{pid}"):
                                         get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
                                         get_db().execute("DELETE FROM forum_comments WHERE post_id=?", (int(pid),))
                                         get_db().commit()
                                         st.success("Tópico removido.")
                                         st.experimental_rerun()
-
-                            # conteúdo e imagens do post
                             post = forum_get_post(pid)
                             if post:
                                 _id, _cat, _title, _body_md, _aid, _aname, _afac, _cts, _imgs = post
@@ -1716,37 +1681,33 @@ if tab_forum is not None:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
-                                        row = st.columns([0.08, 0.77, 0.15])
-                                        with row[0]:
-                                            avb = get_avatar_bytes_by_user_id(caid)
-                                            if avb:
-                                                st.image(avb, width=42)
-                                            else:
-                                                st.markdown("<div style='width:42px;height:42px;border-radius:50%;background:#999;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;'>👤</div>", unsafe_allow_html=True)
-                                        with row[1]:
+                                        row_cols = st.columns([0.1,0.9])
+                                        with row_cols[0]:
+                                            cav_row = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(caid),)).fetchone()
+                                            cav_ext = cav_row[0] if cav_row else None
+                                            cav_bytes = user_avatar_bytes(caid, cav_ext)
+                                            if cav_bytes:
+                                                st.image(cav_bytes, width=40)
+                                        with row_cols[1]:
                                             line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}"
                                             st.markdown(line)
                                             if cbody:
                                                 st.markdown(cbody)
-                                        with row[2]:
-                                            if u and (u["is_admin"]==1 or int(u["id"])==int(caid)):
+                                            if u and (u.get("is_admin",0)==1 or int(u["id"])==int(caid)):
                                                 if st.button("🗑️ Apagar", key=f"delc_{cid}"):
                                                     forum_delete_comment(cid)
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
-                                # novo comentário
+                                # novo comentário (visitante vê aviso)
                                 if u:
-                                    nc_key = f"nc_{pid}"
-                                    nc = st.text_area("Escreva um comentário", key=nc_key, height=100)
+                                    nc = st.text_area("Escreva um comentário", key=f"nc_{pid}", height=100)
                                     if st.button("Comentar", key=f"btn_nc_{pid}"):
                                         if not nc.strip():
                                             st.error("O comentário está vazio.")
                                         else:
                                             forum_add_comment(pid, u, nc)
-                                            try: st.session_state.pop(nc_key, None)
-                                            except Exception: pass
-                                            st.toast("Comentário publicado!")
-                                            st.success("Comentário publicado!")
+                                            st.session_state.pop(f"nc_{pid}", None)
+                                            st.toast("Comentário enviado!")
                                             st.experimental_rerun()
                                 else:
                                     st.caption("_Entre para comentar._")
