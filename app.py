@@ -1507,22 +1507,36 @@ if tab_forum is not None:
                 with colA:
                     st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
                 with colB:
-                    # Dropdown simples para trocar avatar
+                    # Trocar avatar com FORM para evitar loops
+                    if "avatar_nonce" not in st.session_state:
+                        st.session_state["avatar_nonce"] = 0
                     with st.expander("Trocar avatar", expanded=False):
-                        up = st.file_uploader("Carregar nova foto", type=["png","jpg","jpeg","webp"], key="change_avatar")
-                        if up is not None:
-                            ext = None
-                            n = up.name.lower()
-                            if n.endswith(".png"): ext=".png"
-                            elif n.endswith(".jpg") or n.endswith(".jpeg"): ext=".jpg"
-                            elif n.endswith(".webp"): ext=".webp"
-                            if ext:
-                                okext = save_avatar_file(u["id"], up.getvalue(), ext)
-                                if okext:
-                                    st.success("Avatar atualizado!")
-                                    st.experimental_rerun()
+                        with st.form(f"avatar_form_{st.session_state['avatar_nonce']}"):
+                            up = st.file_uploader(
+                                "Carregar nova foto",
+                                type=["png","jpg","jpeg","webp"],
+                                key=f"change_avatar_{st.session_state['avatar_nonce']}"
+                            )
+                            ok_up = st.form_submit_button("Atualizar")
+                        if ok_up:
+                            if up is None:
+                                st.error("Selecione um arquivo de imagem.")
                             else:
-                                st.error("Formato inválido.")
+                                ext = None
+                                n = up.name.lower()
+                                if n.endswith(".png"): ext = ".png"
+                                elif n.endswith(".jpg") or n.endswith(".jpeg"): ext = ".jpg"
+                                elif n.endswith(".webp"): ext = ".webp"
+                                if ext:
+                                    okext = save_avatar_file(u["id"], up.getvalue(), ext)
+                                    if okext:
+                                        st.toast("Avatar atualizado!")
+                                        st.session_state["avatar_nonce"] += 1  # reseta uploader
+                                        st.experimental_rerun()
+                                    else:
+                                        st.error("Falha ao salvar o avatar.")
+                                else:
+                                    st.error("Formato inválido. Use PNG, JPG/JPEG ou WEBP.")
                 with colC:
                     if st.button("Sair", key="logout_btn"):
                         signout_current()
