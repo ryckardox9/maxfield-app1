@@ -1159,44 +1159,6 @@ if res:
         qp_set(job=None)
         st.rerun()
 
-# ---------- HISTÓRICO ----------
-with tab_hist:
-    st.caption(f"Seu ID anônimo: `{UID}` — os planos abaixo ficam disponíveis por 24h.")
-    rows = list_jobs_recent(uid=UID, within_hours=24, limit=50)
-    if not rows:
-        st.info("Sem planos recentes. Gere um plano para aparecer aqui.")
-    else:
-        for (jid, ts, uid, n_port, ncpu, team, out_csv, do_gif, dur_s, out_dir) in rows:
-            dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-            with st.container(border=True):
-                st.write(f"**Job {jid}** — {dt} · Portais: **{n_port}** · CPUs: {ncpu} · {team} · CSV: {bool(out_csv)} · GIF: {bool(do_gif)} · Duração: {int(dur_s)}s")
-                if out_dir and os.path.isdir(out_dir):
-                    pm = os.path.join(out_dir, "portal_map.png")
-                    lm = os.path.join(out_dir, "link_map.png")
-                    gif_p = os.path.join(out_dir, "plan_movie.gif")
-                    zip_p = None
-                    for fn in os.listdir(out_dir):
-                        if fn.endswith(".zip"): zip_p = os.path.join(out_dir, fn)
-                    cols = st.columns(4)
-                    if os.path.exists(pm):
-                        with cols[0]:
-                            st.download_button("Portal Map", data=open(pm,"rb").read(),
-                                               file_name="portal_map.png", mime="image/png", key=f"dl_pm_{jid}")
-                    if os.path.exists(lm):
-                        with cols[1]:
-                            st.download_button("Link Map", data=open(lm,"rb").read(),
-                                               file_name="link_map.png", mime="image/png", key=f"dl_lm_{jid}")
-                    if os.path.exists(gif_p):
-                        with cols[2]:
-                            st.download_button("GIF", data=open(gif_p,"rb").read(),
-                                               file_name="plan_movie.gif", mime="image/gif", key=f"dl_gif_{jid}")
-                    if zip_p and os.path.exists(zip_p):
-                        with cols[3]:
-                            st.download_button("ZIP", data=open(zip_p,"rb").read(),
-                                               file_name=os.path.basename(zip_p), mime="application/zip", key=f"dl_zip_{jid}")
-                else:
-                    st.caption("_Arquivos expirados pela limpeza diária._")
-
 # ---------- MÉTRICAS ----------
 with tab_metrics:
     conn = get_db()
@@ -1459,6 +1421,13 @@ def forum_delete_comment(comment_id:int):
     get_db().execute("UPDATE forum_comments SET deleted_ts=? WHERE id=?", (_now_ts(), int(comment_id)))
     get_db().commit()
 
+def forum_update_post(post_id:int, title:str, body_md:str):
+    get_db().execute(
+        "UPDATE forum_posts SET title=?, body_md=?, updated_ts=? WHERE id=?",
+        (title.strip(), body_md.strip(), _now_ts(), int(post_id))
+    )
+    get_db().commit()
+
 def user_avatar_bytes(user_id:int, avatar_ext:str|None):
     if not avatar_ext: return None
     p = os.path.join("data","avatars",str(user_id), f"avatar{avatar_ext}")
@@ -1637,8 +1606,10 @@ if tab_forum is not None:
                         user_row = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(author_id),)).fetchone()
                         av_ext = user_row[0] if user_row else None
                         avb = user_avatar_bytes(author_id, av_ext)
+                        can_edit_post = u and (u.get("is_admin",0)==1 or int(u["id"])==int(author_id))
+
                         with st.container(border=True):
-                            # Larguras ajustadas: mais espaço para ações
+                            # Cabeçalho do post
                             head_cols = st.columns([0.10, 0.60, 0.30])
                             with head_cols[0]:
                                 if avb:
@@ -1647,20 +1618,22 @@ if tab_forum is not None:
                                 dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
                                 st.markdown(f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br><small>por {author_name} · {author_faction} · {dt}</small>", unsafe_allow_html=True)
                             with head_cols[2]:
-                                # duas subcolunas para evitar empilhamento
                                 colb1, colb2 = st.columns([1, 1], gap="small")
                                 with colb1:
-                                    if u and u.get("is_admin",0)==1:
-                                        st.button("Editar tópico", key=f"edit_post_{pid}", use_container_width=True)
+                                    if can_edit_post:
+                                        if st.button("Editar", key=f"edit_post_btn_{pid}", use_container_width=True):
+                                            st.session_state[f"edit_open_{pid}"] = True
+                                            st.experimental_rerun()
                                 with colb2:
-                                    if u and u.get("is_admin",0)==1:
-                                        if st.button("Apagar tópico", key=f"del_post_{pid}", use_container_width=True):
+                                    if can_edit_post:
+                                        if st.button("Apagar", key=f"del_post_{pid}", use_container_width=True):
                                             get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
                                             get_db().execute("DELETE FROM forum_comments WHERE post_id=?", (int(pid),))
                                             get_db().commit()
                                             st.success("Tópico removido.")
                                             st.experimental_rerun()
 
+                            # Corpo do post
                             post = forum_get_post(pid)
                             if post:
                                 _id, _cat, _title, _body_md, _aid, _aname, _afac, _cts, _imgs = post
@@ -1679,6 +1652,29 @@ if tab_forum is not None:
                                         if os.path.exists(p):
                                             with ig_cols[i % len(ig_cols)]:
                                                 st.image(open(p,"rb").read())
+
+                            # Editor inline quando solicitado
+                            if can_edit_post and st.session_state.get(f"edit_open_{pid}", False):
+                                with st.container(border=True):
+                                    st.markdown("#### Editar tópico")
+                                    et_title = st.text_input("Título", value=_title or title, key=f"et_title_{pid}")
+                                    et_body  = st.text_area("Conteúdo (Markdown)", value=_body_md or "", height=140, key=f"et_body_{pid}")
+                                    c1, c2 = st.columns([0.2,0.2])
+                                    save_clicked   = c1.button("Salvar",   key=f"et_save_{pid}")
+                                    cancel_clicked = c2.button("Cancelar", key=f"et_cancel_{pid}")
+                                    if save_clicked:
+                                        new_title = et_title.strip() or title
+                                        forum_update_post(pid, new_title, et_body or "")
+                                        st.session_state.pop(f"et_title_{pid}", None)
+                                        st.session_state.pop(f"et_body_{pid}", None)
+                                        st.session_state[f"edit_open_{pid}"] = False
+                                        st.toast("Tópico atualizado!")
+                                        st.experimental_rerun()
+                                    if cancel_clicked:
+                                        st.session_state.pop(f"et_title_{pid}", None)
+                                        st.session_state.pop(f"et_body_{pid}", None)
+                                        st.session_state[f"edit_open_{pid}"] = False
+                                        st.experimental_rerun()
 
                             # ===== Comentários =====
                             if COMMENTS_ENABLED:
