@@ -473,11 +473,13 @@ function wrapper(plugin_info) {
 
   self.send = async function(){
     const map = window.map;
-    const zoom = map && map.getZoom ? map.getZoom() : 0;
-    if (zoom < self.MIN_ZOOM) {
-      alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\\n\\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
-      return;
-    }
+    const zoom = map && map.getZoom ? map.getZoom : 0;
+    if (map && typeof map.getZoom === 'function') {{
+      if (map.getZoom() < self.MIN_ZOOM) {{
+        alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\\n\\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
+        return;
+      }}
+    }}
 
     let lines = self.visiblePortals();
     selfupdateCounter(lines.length);
@@ -586,7 +588,7 @@ function wrapper(plugin_info) {
 const script = document.createElement('script');
 const info = {};
 if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
-  info.script = {{ version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description }};
+  info.script = { version: GM_info.script.version, name: GM_info.script.name, description: GM_info.script.description };
 }
 script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'));
 (document.body || document.documentElement).appendChild(script);
@@ -902,13 +904,7 @@ with tab_gen:
                 df = pd.DataFrame(pts)
                 mid_lat = df["lat"].mean()
                 mid_lon = df["lon"].mean()
-                layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=df,
-                    get_position='[lon, lat]',
-                    get_radius=12,
-                    pickable=True
-                )
+                layer = pdk.Layer("ScatterplotLayer", data=df, get_position='[lon, lat]', get_radius=12, pickable=True)
                 st.pydeck_chart(pdk.Deck(map_style=None,
                                          initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=14),
                                          layers=[layer]))
@@ -929,20 +925,10 @@ with tab_gen:
         gerar_gif_checkbox = st.checkbox("Gerar GIF (passo-a-passo)", value=gif_default, disabled=st.session_state.get("fast_mode", False), key="out_gif")
 
         st.markdown("**Mapa de fundo (opcional):**")
-        google_key_input = st.text_input(
-            "Google Maps API key (opcional)",
-            value="",
-            help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente.",
-            key="g_key"
-        )
+        google_key_input = st.text_input("Google Maps API key (opcional)", value="", help="Se deixar vazio e houver uma chave salva no servidor, ela será usada automaticamente.", key="g_key")
         google_api_secret_input = st.text_input("Google Maps API secret (opcional)", value="", type="password", key="g_secret")
 
-        sem_mapa = st.checkbox(
-            "Sem mapa de fundo (mais rápido/robusto)",
-            value=False,
-            help="Ignora a API do Google nesta execução (útil quando a rede/quotas estão instáveis).",
-            key="no_bg_map"
-        )
+        sem_mapa = st.checkbox("Sem mapa de fundo (mais rápido/robusto)", value=False, help="Ignora a API do Google nesta execução (útil quando a rede/quotas estão instáveis).", key="no_bg_map")
 
         submitted = st.form_submit_button("Gerar plano", use_container_width=True)
 
@@ -1490,7 +1476,7 @@ if tab_forum is not None:
 
         u = current_user()
 
-        # Banner visitante + login compacto (antes da lista de tópicos)
+        # Banner visitante + login compacto
         if not u:
             st.info("Você está navegando como **visitante**. Entre para comentar/postar.")
             with st.container(border=True):
@@ -1557,7 +1543,7 @@ if tab_forum is not None:
                 with colC:
                     av_bytes = user_avatar_bytes(u["id"], u.get("avatar_ext"))
                     if av_bytes:
-                        st.image(av_bytes, caption="", width=64)
+                        st.image(av_bytes, width=64)
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1570,7 +1556,7 @@ if tab_forum is not None:
                 cat = CATS[ci]
                 can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
-                # ===== NOVO: Criar tópico via cartão controlado por estado (fecha/limpa ao postar) =====
+                # Criar tópico (controlado por estado)
                 exp_key = f"new_topic_open_{cat}"
                 if exp_key not in st.session_state:
                     st.session_state[exp_key] = False
@@ -1624,14 +1610,13 @@ if tab_forum is not None:
                     elif cat == "Atualizações" and u and u['is_admin'] != 1:
                         st.caption("_Apenas admin pode publicar em Atualizações._")
 
-                # ===== Lista de posts =====
+                # Lista de posts
                 posts = forum_list_posts(cat)
                 if not posts:
                     st.info("Nenhum tópico ainda.")
                 else:
                     for (pid, title, author_name, author_faction, cts, images_json, author_id) in posts:
                         cnt = forum_count_comments(pid)
-                        # avatar do autor ao lado do cabeçalho do post
                         user_row = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(author_id),)).fetchone()
                         av_ext = user_row[0] if user_row else None
                         av_bytes = user_avatar_bytes(author_id, av_ext)
@@ -1670,7 +1655,7 @@ if tab_forum is not None:
                                             with ig_cols[i % len(ig_cols)]:
                                                 st.image(open(p,"rb").read())
 
-                            # comentários
+                            # ===== Comentários =====
                             if COMMENTS_ENABLED:
                                 st.markdown("**Comentários:**")
                                 comms = forum_list_comments(pid)
@@ -1698,15 +1683,24 @@ if tab_forum is not None:
                                                     forum_delete_comment(cid)
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
-                                # novo comentário (visitante vê aviso)
+
+                                # NOVO: caixa de comentário com NONCE para limpar após envio
                                 if u:
-                                    nc = st.text_area("Escreva um comentário", key=f"nc_{pid}", height=100)
+                                    nonce_key_c = f"comment_nonce_{pid}"
+                                    if nonce_key_c not in st.session_state:
+                                        st.session_state[nonce_key_c] = 0
+                                    nc = st.text_area(
+                                        "Escreva um comentário",
+                                        key=f"nc_{pid}_{st.session_state[nonce_key_c]}",
+                                        height=100
+                                    )
                                     if st.button("Comentar", key=f"btn_nc_{pid}"):
-                                        if not nc.strip():
+                                        if not (nc or "").strip():
                                             st.error("O comentário está vazio.")
                                         else:
                                             forum_add_comment(pid, u, nc)
-                                            st.session_state.pop(f"nc_{pid}", None)
+                                            # incrementa nonce -> widget ganha nova chave -> caixa vem vazia
+                                            st.session_state[nonce_key_c] += 1
                                             st.toast("Comentário enviado!")
                                             st.experimental_rerun()
                                 else:
