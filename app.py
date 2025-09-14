@@ -1216,7 +1216,7 @@ with tab_hist:
                 if out_dir and os.path.isdir(out_dir):
                     pm = os.path.join(out_dir, "portal_map.png")
                     lm = os.path.join(out_dir, "link_map.png")
-                    gif_p = os.path.join(out_dir, "plan_movie.gif")
+                    gif_p = os.path.join(outdir := out_dir, "plan_movie.gif")
                     zip_p = None
                     for fn in os.listdir(out_dir):
                         if fn.endswith(".zip"): zip_p = os.path.join(out_dir, fn)
@@ -1469,8 +1469,9 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
     return post_id
 
 def forum_list_posts(cat:str):
+    # >>> inclui author_id para permitir buscar avatar
     cur = get_db().execute("""
-        SELECT id, title, author_name, author_faction, created_ts, images_json
+        SELECT id, title, author_id, author_name, author_faction, created_ts, images_json
           FROM forum_posts
          WHERE cat=?
          ORDER BY is_pinned DESC, created_ts DESC
@@ -1504,6 +1505,20 @@ def forum_list_comments(post_id:int):
 def forum_delete_comment(comment_id:int):
     get_db().execute("UPDATE forum_comments SET deleted_ts=? WHERE id=?", (_now_ts(), int(comment_id)))
     get_db().commit()
+
+# helper: avatar bytes por user_id
+def get_avatar_bytes_by_user_id(user_id:int):
+    try:
+        cur = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(user_id),))
+        r = cur.fetchone()
+        av_ext = r[0] if r and r[0] else None
+        if av_ext:
+            ap = os.path.join("data","avatars",str(int(user_id)), f"avatar{av_ext}")
+            if os.path.exists(ap):
+                return open(ap,"rb").read()
+    except Exception:
+        return None
+    return None
 
 def require_login_ui():
     u = current_user()
@@ -1587,7 +1602,7 @@ if tab_forum is not None:
                     if st.button("Sair", key="logout_btn"):
                         signout_current()
 
-        # >>>>>> LOGIN/REGISTRO IMEDIATAMENTE ABAIXO DO CABEÇALHO (se visitante)
+        # LOGIN/REGISTRO (visitante)
         def render_login_boxes_top():
             with st.expander("Entrar / Criar conta", expanded=False):
                 colL, colR = st.columns(2)
@@ -1655,7 +1670,6 @@ if tab_forum is not None:
         for ci, ct in enumerate(cat_tabs):
             with ct:
                 cat = CATS[ci]
-                # criador: admin só em Atualizações; demais livres – mas precisa estar logado
                 can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
                 if can_create:
@@ -1668,6 +1682,11 @@ if tab_forum is not None:
                                 st.error("Informe um título.")
                             else:
                                 pid = forum_create_post(cat, nt_title, nt_body, nt_imgs, u)
+                                # limpa campos e feedback
+                                for _k in (f"nt_title_{cat}", f"nt_body_{cat}", f"nt_imgs_{cat}"):
+                                    try: st.session_state.pop(_k, None)
+                                    except Exception: pass
+                                st.toast("Postagem enviada!")
                                 st.success("Postagem enviada!")
                                 st.experimental_rerun()
                 else:
@@ -1676,19 +1695,29 @@ if tab_forum is not None:
                     elif cat == "Atualizações" and u and u["is_admin"] != 1:
                         st.caption("_Apenas admin pode publicar em Atualizações._")
 
-                # Lista de posts
+                # Lista de posts (com avatar do autor)
                 posts = forum_list_posts(cat)
                 if not posts:
                     st.info("Nenhum tópico ainda.")
                 else:
-                    for (pid, title, author_name, author_faction, cts, images_json) in posts:
+                    for (pid, title, author_id, author_name, author_faction, cts, images_json) in posts:
                         cnt = forum_count_comments(pid)
                         with st.container(border=True):
-                            cols = st.columns([0.75,0.25])
+                            cols = st.columns([0.10, 0.70, 0.20])  # avatar | texto | ações
                             with cols[0]:
-                                dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
-                                st.markdown(f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br><small>por {author_name} · {author_faction} · {dt}</small>", unsafe_allow_html=True)
+                                avb = get_avatar_bytes_by_user_id(author_id)
+                                if avb:
+                                    st.image(avb, width=48)
+                                else:
+                                    st.markdown("<div style='width:48px;height:48px;border-radius:50%;background:#999;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;'>👤</div>", unsafe_allow_html=True)
                             with cols[1]:
+                                dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
+                                st.markdown(
+                                    f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br>"
+                                    f"<small>por {author_name} · {author_faction} · {dt}</small>",
+                                    unsafe_allow_html=True
+                                )
+                            with cols[2]:
                                 if u and u["is_admin"]==1:
                                     if st.button("Apagar tópico", key=f"del_post_{pid}"):
                                         get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
@@ -1696,7 +1725,8 @@ if tab_forum is not None:
                                         get_db().commit()
                                         st.success("Tópico removido.")
                                         st.experimental_rerun()
-                            # conteúdo e imagens
+
+                            # conteúdo e imagens do post
                             post = forum_get_post(pid)
                             if post:
                                 _id, _cat, _title, _body_md, _aid, _aname, _afac, _cts, _imgs = post
@@ -1727,20 +1757,11 @@ if tab_forum is not None:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
-                                        # avatar + cabeçalho
                                         row = st.columns([0.08, 0.77, 0.15])
                                         with row[0]:
-                                            avatar_bytes = None
-                                            conn = get_db()
-                                            cur = conn.execute("SELECT avatar_ext FROM users WHERE id=?", (int(caid),))
-                                            r = cur.fetchone()
-                                            av_ext = r[0] if r and r[0] else None
-                                            if av_ext:
-                                                ap = os.path.join("data","avatars",str(int(caid)), f"avatar{av_ext}")
-                                                if os.path.exists(ap):
-                                                    avatar_bytes = open(ap,"rb").read()
-                                            if avatar_bytes:
-                                                st.image(avatar_bytes, width=42)
+                                            avb = get_avatar_bytes_by_user_id(caid)
+                                            if avb:
+                                                st.image(avb, width=42)
                                             else:
                                                 st.markdown("<div style='width:42px;height:42px;border-radius:50%;background:#999;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;'>👤</div>", unsafe_allow_html=True)
                                         with row[1]:
@@ -1756,12 +1777,17 @@ if tab_forum is not None:
                                                     st.experimental_rerun()
                                 # novo comentário
                                 if u:
-                                    nc = st.text_area("Escreva um comentário", key=f"nc_{pid}", height=100)
+                                    nc_key = f"nc_{pid}"
+                                    nc = st.text_area("Escreva um comentário", key=nc_key, height=100)
                                     if st.button("Comentar", key=f"btn_nc_{pid}"):
                                         if not nc.strip():
                                             st.error("O comentário está vazio.")
                                         else:
                                             forum_add_comment(pid, u, nc)
+                                            # limpa textarea e feedback
+                                            try: st.session_state.pop(nc_key, None)
+                                            except Exception: pass
+                                            st.toast("Comentário publicado!")
                                             st.success("Comentário publicado!")
                                             st.experimental_rerun()
                                 else:
