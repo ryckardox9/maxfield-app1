@@ -1507,17 +1507,35 @@ if tab_forum is not None:
                 with colA:
                     st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
                 with colB:
-                    # Trocar avatar com FORM para evitar loops
-                    if "avatar_nonce" not in st.session_state:
-                        st.session_state["avatar_nonce"] = 0
-                    with st.expander("Trocar avatar", expanded=False):
+                    # ----- NOVO: botão abre painel full-width abaixo -----
+                    if "avatar_open" not in st.session_state:
+                        st.session_state["avatar_open"] = False
+                    if st.button(("Fechar avatar" if st.session_state["avatar_open"] else "Trocar avatar"),
+                                 key="open_avatar_btn", use_container_width=True):
+                        st.session_state["avatar_open"] = not st.session_state["avatar_open"]
+                with colC:
+                    if st.button("Sair", key="logout_btn"):
+                        signout_current()
+
+            # Painel de troca de avatar (full-width, centralizado)
+            if st.session_state.get("avatar_open", False):
+                if "avatar_nonce" not in st.session_state:
+                    st.session_state["avatar_nonce"] = 0
+                with st.container(border=True):
+                    st.markdown("#### Trocar avatar")
+                    cL, cM, cR = st.columns([0.2, 0.6, 0.2])
+                    with cM:
                         with st.form(f"avatar_form_{st.session_state['avatar_nonce']}"):
                             up = st.file_uploader(
                                 "Carregar nova foto",
                                 type=["png","jpg","jpeg","webp"],
-                                key=f"change_avatar_{st.session_state['avatar_nonce']}"
+                                key=f"change_avatar_{st.session_state['avatar_nonce']}",
+                                label_visibility="collapsed",
                             )
-                            ok_up = st.form_submit_button("Atualizar")
+                            st.caption("PNG · JPG · JPEG · WEBP — máx. 50MB")
+                            b1, b2 = st.columns(2)
+                            ok_up   = b1.form_submit_button("Atualizar", use_container_width=True)
+                            cancel  = b2.form_submit_button("Cancelar", use_container_width=True)
                         if ok_up:
                             if up is None:
                                 st.error("Selecione um arquivo de imagem.")
@@ -1531,15 +1549,17 @@ if tab_forum is not None:
                                     okext = save_avatar_file(u["id"], up.getvalue(), ext)
                                     if okext:
                                         st.toast("Avatar atualizado!")
-                                        st.session_state["avatar_nonce"] += 1  # reseta uploader
+                                        st.session_state["avatar_nonce"] += 1
+                                        st.session_state["avatar_open"] = False
                                         st.experimental_rerun()
                                     else:
                                         st.error("Falha ao salvar o avatar.")
                                 else:
                                     st.error("Formato inválido. Use PNG, JPG/JPEG ou WEBP.")
-                with colC:
-                    if st.button("Sair", key="logout_btn"):
-                        signout_current()
+                        if cancel:
+                            st.session_state["avatar_open"] = False
+                            st.experimental_rerun()
+
             # avatar preview
             av_bytes = user_avatar_bytes(u["id"], u.get("avatar_ext"))
             if av_bytes:
