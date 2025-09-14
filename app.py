@@ -76,7 +76,7 @@ st.markdown(
       background:#00000022;
     }}
 
-    /* ===== Tabs principais mais destacadas (pill, grandes) ===== */
+    /* ===== Tabs principais mais destacadas ===== */
     .stTabs [role="tablist"]{{
       gap: 10px;
       border-bottom: none;
@@ -1216,7 +1216,7 @@ with tab_hist:
                 if out_dir and os.path.isdir(out_dir):
                     pm = os.path.join(out_dir, "portal_map.png")
                     lm = os.path.join(out_dir, "link_map.png")
-                    gif_p = os.path.join(outdir := out_dir, "plan_movie.gif")
+                    gif_p = os.path.join(out_dir, "plan_movie.gif")
                     zip_p = None
                     for fn in os.listdir(out_dir):
                         if fn.endswith(".zip"): zip_p = os.path.join(out_dir, fn)
@@ -1469,7 +1469,6 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
     return post_id
 
 def forum_list_posts(cat:str):
-    # >>> inclui author_id para permitir buscar avatar
     cur = get_db().execute("""
         SELECT id, title, author_id, author_name, author_faction, created_ts, images_json
           FROM forum_posts
@@ -1519,66 +1518,6 @@ def get_avatar_bytes_by_user_id(user_id:int):
     except Exception:
         return None
     return None
-
-def require_login_ui():
-    u = current_user()
-    if u:
-        return u
-
-    st.subheader("Entrar / Criar conta")
-    with st.expander("Já tenho conta", expanded=True):
-        li_user = st.text_input("Usuário ou e-mail", key="li_user")
-        li_pass = st.text_input("Senha", type="password", key="li_pass")
-        if st.button("Entrar", key="li_btn"):
-            usr = get_user_by_username_or_email(li_user)
-            if not usr or not check_password(usr, li_pass):
-                st.error("Usuário ou senha inválidos.")
-            else:
-                token = create_session(usr["id"])
-                st.session_state["user"] = usr
-                qp_set(token=token)
-                try: st.toast("Login ok!")
-                except: pass
-                st.experimental_rerun()
-
-    with st.expander("Criar nova conta", expanded=False):
-        su_user = st.text_input("Nome de usuário (único)", key="su_user")
-        su_faction = st.selectbox("Facção", ["Enlightened", "Resistance"], key="su_faction")
-        su_email = st.text_input("E-mail (opcional)", key="su_email")
-        su_pass = st.text_input("Senha", type="password", key="su_pass")
-        su_pass2 = st.text_input("Confirmar senha", type="password", key="su_pass2")
-        su_avatar = st.file_uploader("Avatar (opcional)", type=["png","jpg","jpeg","webp"], key="su_avatar")
-        su_admin_code = st.text_input("Código de admin (deixe vazio se não for admin)", type="password", key="su_admin_code")
-
-        if st.button("Criar conta", key="su_btn"):
-            if not su_user or not su_pass:
-                st.error("Preencha usuário e senha.")
-            elif su_pass != su_pass2:
-                st.error("As senhas não conferem.")
-            else:
-                is_admin = bool(ADMIN_CODE) and (su_admin_code.strip() == ADMIN_CODE.strip())
-                av_bytes, av_ext = None, None
-                if su_avatar is not None:
-                    av_bytes = su_avatar.getvalue()
-                    n = su_avatar.name.lower()
-                    if n.endswith(".png"): av_ext=".png"
-                    elif n.endswith(".jpg") or n.endswith(".jpeg"): av_ext=".jpg"
-                    elif n.endswith(".webp"): av_ext=".webp"
-                    else: av_ext=None
-                try:
-                    uid = create_user(su_user, su_pass, su_faction, (su_email or "").strip() or None, is_admin, av_bytes, av_ext)
-                    usr = get_user_by_username_or_email(su_user)
-                    token = create_session(usr["id"])
-                    st.session_state["user"] = usr
-                    qp_set(token=token)
-                    st.success("Conta criada! Você já está logado.")
-                    st.experimental_rerun()
-                except ValueError as ve:
-                    st.error(str(ve))
-                except Exception as e:
-                    st.error(f"Erro ao criar conta: {e}")
-
-    st.stop()
 
 # ---- Fórum UI ----
 if tab_forum is not None:
@@ -1670,22 +1609,42 @@ if tab_forum is not None:
         for ci, ct in enumerate(cat_tabs):
             with ct:
                 cat = CATS[ci]
+
+                # estado controlado do expander + nonce do uploader (para reset)
+                exp_key = f"exp_new_topic_open_{cat}"
+                if exp_key not in st.session_state:
+                    st.session_state[exp_key] = False  # começa fechado
+                nonce_key = f"nt_uploader_nonce_{cat}"
+                if nonce_key not in st.session_state:
+                    st.session_state[nonce_key] = 0
+
                 can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
                 if can_create:
-                    with st.expander("➕ Novo tópico", expanded=False):
+                    with st.expander("➕ Novo tópico", expanded=st.session_state[exp_key]):
                         nt_title = st.text_input("Título", key=f"nt_title_{cat}")
                         nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
-                        nt_imgs = st.file_uploader(f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True, key=f"nt_imgs_{cat}")
+                        nt_imgs = st.file_uploader(
+                            f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)",
+                            type=["png","jpg","jpeg","webp"],
+                            accept_multiple_files=True,
+                            key=f"nt_imgs_{cat}_{st.session_state[nonce_key]}",
+                        )
                         if st.button("Postar", key=f"nt_post_{cat}"):
                             if not nt_title.strip():
                                 st.error("Informe um título.")
                             else:
-                                pid = forum_create_post(cat, nt_title, nt_body, nt_imgs, u)
-                                # limpa campos e feedback
-                                for _k in (f"nt_title_{cat}", f"nt_body_{cat}", f"nt_imgs_{cat}"):
+                                # pega os arquivos do uploader atual (com a key com nonce)
+                                images = st.session_state.get(f"nt_imgs_{cat}_{st.session_state[nonce_key]}", None)
+                                pid = forum_create_post(cat, nt_title, nt_body, images, u)
+
+                                # limpa campos, fecha expander e reseta uploader
+                                for _k in (f"nt_title_{cat}", f"nt_body_{cat}"):
                                     try: st.session_state.pop(_k, None)
                                     except Exception: pass
+                                st.session_state[nonce_key] += 1  # muda a key do uploader -> limpa
+                                st.session_state[exp_key] = False
+
                                 st.toast("Postagem enviada!")
                                 st.success("Postagem enviada!")
                                 st.experimental_rerun()
@@ -1784,7 +1743,6 @@ if tab_forum is not None:
                                             st.error("O comentário está vazio.")
                                         else:
                                             forum_add_comment(pid, u, nc)
-                                            # limpa textarea e feedback
                                             try: st.session_state.pop(nc_key, None)
                                             except Exception: pass
                                             st.toast("Comentário publicado!")
