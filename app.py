@@ -1,3 +1,4 @@
+# app.py
 import os
 import io
 import sys
@@ -183,6 +184,7 @@ def get_db():
         ("post_id","INTEGER"),("author_id","INTEGER"),
         ("author_name","TEXT"),("author_faction","TEXT"),
         ("body_md","TEXT"),("created_ts","INTEGER"),("deleted_ts","INTEGER"),
+        ("updated_ts","INTEGER"),  # <<< NOVO para flag “editado”
         # legados
         ("ts","INTEGER"),("uid","TEXT"),("body","TEXT"),
     ]: ensure_col("forum_comments", col, decl)
@@ -1422,6 +1424,13 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
     conn.commit()
     return post_id
 
+def forum_update_post(post_id:int, title:str, body_md:str):
+    get_db().execute(
+        "UPDATE forum_posts SET title=?, body_md=?, updated_ts=? WHERE id=?",
+        (title.strip(), body_md.strip(), _now_ts(), int(post_id))
+    )
+    get_db().commit()
+
 def forum_list_posts(cat:str):
     cur = get_db().execute("""
         SELECT id, title, author_name, author_faction, created_ts, images_json, author_id
@@ -1441,14 +1450,21 @@ def forum_get_post(post_id:int):
 def forum_add_comment(post_id:int, author:dict, body_md:str):
     ts = _now_ts()
     get_db().execute("""
-        INSERT INTO forum_comments(post_id,author_id,author_name,author_faction,body_md,created_ts,deleted_ts)
-        VALUES(?,?,?,?,?,?,NULL)
+        INSERT INTO forum_comments(post_id,author_id,author_name,author_faction,body_md,created_ts,deleted_ts,updated_ts)
+        VALUES(?,?,?,?,?,?,NULL,NULL)
     """, (int(post_id), int(author["id"]), author["username"], author["faction"], body_md.strip(), ts))
+    get_db().commit()
+
+def forum_update_comment(comment_id:int, body_md:str):
+    get_db().execute(
+        "UPDATE forum_comments SET body_md=?, updated_ts=? WHERE id=?",
+        (body_md.strip(), _now_ts(), int(comment_id))
+    )
     get_db().commit()
 
 def forum_list_comments(post_id:int):
     cur = get_db().execute("""
-        SELECT id, author_id, author_name, author_faction, body_md, created_ts, deleted_ts
+        SELECT id, author_id, author_name, author_faction, body_md, created_ts, deleted_ts, updated_ts
           FROM forum_comments
          WHERE post_id=?
          ORDER BY created_ts ASC
@@ -1534,16 +1550,29 @@ if tab_forum is not None:
                                 st.error(f"Erro ao criar conta: {e}")
         else:
             with st.container(border=True):
-                colA, colB, colC = st.columns([0.7,0.2,0.1])
+                colA, colB, colC = st.columns([0.55,0.25,0.20])
                 with colA:
                     st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
                 with colB:
+                    # Trocar avatar
+                    st.caption("Trocar avatar")
+                    up_av = st.file_uploader(" ", type=["png","jpg","jpeg","webp"], key="change_avatar", label_visibility="collapsed")
+                    if up_av and st.button("Atualizar avatar", key="btn_change_avatar"):
+                        ext = os.path.splitext(up_av.name)[1].lower() or ".png"
+                        if len(up_av.getvalue()) > MAX_IMG_MB*1024*1024:
+                            st.error(f"Arquivo > {MAX_IMG_MB}MB.")
+                        else:
+                            if save_avatar_file(u["id"], up_av.getvalue(), ext):
+                                st.success("Avatar atualizado!")
+                                st.experimental_rerun()
+                            else:
+                                st.error("Falha ao salvar avatar.")
+                with colC:
                     if st.button("Sair", key="logout_btn"):
                         signout_current()
-                with colC:
-                    av_bytes = user_avatar_bytes(u["id"], u.get("avatar_ext"))
-                    if av_bytes:
-                        st.image(av_bytes, width=64)
+                av_bytes = user_avatar_bytes(u["id"], u.get("avatar_ext"))
+                if av_bytes:
+                    st.image(av_bytes, width=64)
 
         st.markdown("---")
         st.subheader("Tópicos")
@@ -1556,7 +1585,7 @@ if tab_forum is not None:
                 cat = CATS[ci]
                 can_create = (cat == "Atualizações" and u and u["is_admin"]==1) or (cat in ("Sugestões","Críticas","Dúvidas") and u)
 
-                # Criar tópico (controlado por estado)
+                # Novo tópico: expander retrátil
                 exp_key = f"new_topic_open_{cat}"
                 if exp_key not in st.session_state:
                     st.session_state[exp_key] = False
@@ -1565,45 +1594,40 @@ if tab_forum is not None:
                     st.session_state[nonce_key] = 0
 
                 if can_create:
-                    if not st.session_state[exp_key]:
-                        if st.button("➕ Novo tópico", key=f"open_new_topic_{cat}"):
-                            st.session_state[exp_key] = True
-                            st.experimental_rerun()
-                    else:
-                        with st.container(border=True):
-                            st.markdown("### ➕ Novo tópico")
-                            nt_title = st.text_input("Título", key=f"nt_title_{cat}")
-                            nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
-                            nt_imgs = st.file_uploader(
-                                f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)",
-                                type=["png","jpg","jpeg","webp"],
-                                accept_multiple_files=True,
-                                key=f"nt_imgs_{cat}_{st.session_state[nonce_key]}",
-                            )
-                            col_btns = st.columns([0.2,0.2,0.6])
-                            post_clicked   = col_btns[0].button("Postar",   key=f"nt_post_{cat}")
-                            cancel_clicked = col_btns[1].button("Cancelar", key=f"nt_cancel_{cat}")
+                    with st.expander("➕ Novo tópico", expanded=st.session_state[exp_key]):
+                        st.caption("Crie um novo tópico para esta categoria.")
+                        nt_title = st.text_input("Título", key=f"nt_title_{cat}")
+                        nt_body = st.text_area("Conteúdo (Markdown)", key=f"nt_body_{cat}", height=140)
+                        nt_imgs = st.file_uploader(
+                            f"Imagens (até {MAX_IMGS_PER_POST} × {MAX_IMG_MB}MB)",
+                            type=["png","jpg","jpeg","webp"],
+                            accept_multiple_files=True,
+                            key=f"nt_imgs_{cat}_{st.session_state[nonce_key]}",
+                        )
+                        col_btns = st.columns([0.2,0.2,0.6])
+                        post_clicked   = col_btns[0].button("Postar",   key=f"nt_post_{cat}")
+                        cancel_clicked = col_btns[1].button("Cancelar", key=f"nt_cancel_{cat}")
 
-                            if cancel_clicked:
+                        if cancel_clicked:
+                            for _k in (f"nt_title_{cat}", f"nt_body_{cat}"):
+                                st.session_state.pop(_k, None)
+                            st.session_state[nonce_key] += 1
+                            st.session_state[exp_key] = False
+                            st.toast("Criação cancelada.")
+                            st.experimental_rerun()
+
+                        if post_clicked:
+                            if not nt_title.strip():
+                                st.error("Informe um título.")
+                            else:
+                                forum_create_post(cat, nt_title, nt_body, nt_imgs, u)
                                 for _k in (f"nt_title_{cat}", f"nt_body_{cat}"):
                                     st.session_state.pop(_k, None)
                                 st.session_state[nonce_key] += 1
                                 st.session_state[exp_key] = False
-                                st.toast("Criação cancelada.")
+                                st.toast("Postagem enviada!")
+                                st.success("Postagem enviada!")
                                 st.experimental_rerun()
-
-                            if post_clicked:
-                                if not nt_title.strip():
-                                    st.error("Informe um título.")
-                                else:
-                                    forum_create_post(cat, nt_title, nt_body, nt_imgs, u)
-                                    for _k in (f"nt_title_{cat}", f"nt_body_{cat}"):
-                                        st.session_state.pop(_k, None)
-                                    st.session_state[nonce_key] += 1
-                                    st.session_state[exp_key] = False
-                                    st.toast("Postagem enviada!")
-                                    st.success("Postagem enviada!")
-                                    st.experimental_rerun()
                 else:
                     if not u:
                         st.caption("_Entre para criar um novo tópico._")
@@ -1629,31 +1653,58 @@ if tab_forum is not None:
                                 dt = datetime.fromtimestamp(cts).strftime("%Y-%m-%d %H:%M")
                                 st.markdown(f"**{title}**  <span class='mf-badge'>{cnt} comentários</span><br><small>por {author_name} · {author_faction} · {dt}</small>", unsafe_allow_html=True)
                             with head_cols[2]:
-                                if u and u.get("is_admin",0)==1:
-                                    if st.button("Apagar tópico", key=f"del_post_{pid}"):
+                                can_edit_post = u and (u.get("is_admin",0)==1 or int(u["id"])==int(author_id))
+                                if can_edit_post:
+                                    colE, colD = st.columns(2)
+                                    if colE.button("Editar tópico", key=f"edit_post_{pid}"):
+                                        st.session_state[f"editing_post_{pid}"]=True
+                                        st.experimental_rerun()
+                                    if colD.button("Apagar tópico", key=f"del_post_{pid}"):
                                         get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
                                         get_db().execute("DELETE FROM forum_comments WHERE post_id=?", (int(pid),))
                                         get_db().commit()
                                         st.success("Tópico removido.")
                                         st.experimental_rerun()
-                            post = forum_get_post(pid)
-                            if post:
+
+                            # Edição de post
+                            if st.session_state.get(f"editing_post_{pid}", False):
+                                post = forum_get_post(pid)
                                 _id, _cat, _title, _body_md, _aid, _aname, _afac, _cts, _imgs = post
-                                if _body_md:
-                                    st.markdown(_body_md)
-                                try:
-                                    imgs = json.loads(_imgs or "[]")
-                                except:
-                                    imgs = []
-                                if imgs:
-                                    st.caption("Imagens:")
-                                    ig_cols = st.columns(min(3,len(imgs)))
-                                    root = os.path.join("data","posts",str(pid))
-                                    for i, name in enumerate(imgs):
-                                        p = os.path.join(root, name)
-                                        if os.path.exists(p):
-                                            with ig_cols[i % len(ig_cols)]:
-                                                st.image(open(p,"rb").read())
+                                st.markdown("**Editar tópico**")
+                                new_title = st.text_input("Título", value=_title, key=f"ep_title_{pid}")
+                                new_body  = st.text_area("Conteúdo (Markdown)", value=_body_md or "", key=f"ep_body_{pid}", height=140)
+                                sb, cb = st.columns(2)
+                                if sb.button("Salvar alterações", key=f"ep_save_{pid}"):
+                                    if can_edit_post:
+                                        forum_update_post(pid, new_title, new_body)
+                                        st.session_state.pop(f"editing_post_{pid}", None)
+                                        st.toast("Tópico atualizado!")
+                                        st.experimental_rerun()
+                                    else:
+                                        st.error("Sem permissão para editar este tópico.")
+                                if cb.button("Cancelar", key=f"ep_cancel_{pid}"):
+                                    st.session_state.pop(f"editing_post_{pid}", None)
+                                    st.experimental_rerun()
+                            else:
+                                # conteúdo e imagens
+                                post = forum_get_post(pid)
+                                if post:
+                                    _id, _cat, _title, _body_md, _aid, _aname, _afac, _cts, _imgs = post
+                                    if _body_md:
+                                        st.markdown(_body_md)
+                                    try:
+                                        imgs = json.loads(_imgs or "[]")
+                                    except:
+                                        imgs = []
+                                    if imgs:
+                                        st.caption("Imagens:")
+                                        ig_cols = st.columns(min(3,len(imgs)))
+                                        root = os.path.join("data","posts",str(pid))
+                                        for i, name in enumerate(imgs):
+                                            p = os.path.join(root, name)
+                                            if os.path.exists(p):
+                                                with ig_cols[i % len(ig_cols)]:
+                                                    st.image(open(p,"rb").read())
 
                             # ===== Comentários =====
                             if COMMENTS_ENABLED:
@@ -1662,7 +1713,7 @@ if tab_forum is not None:
                                 if not comms:
                                     st.caption("Seja o primeiro a comentar.")
                                 else:
-                                    for (cid, caid, caname, cafac, cbody, ctime, cdel) in comms:
+                                    for (cid, caid, caname, cafac, cbody, ctime, cdel, cupd) in comms:
                                         if cdel:
                                             st.caption("_comentário removido_")
                                             continue
@@ -1674,17 +1725,34 @@ if tab_forum is not None:
                                             if cav_bytes:
                                                 st.image(cav_bytes, width=40)
                                         with row_cols[1]:
-                                            line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}"
+                                            edited = " _(editado)_" if (cupd and int(cupd or 0)>0) else ""
+                                            line = f"**{caname}** · {cafac} · {datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M')}{edited}"
                                             st.markdown(line)
                                             if cbody:
                                                 st.markdown(cbody)
-                                            if u and (u.get("is_admin",0)==1 or int(u["id"])==int(caid)):
-                                                if st.button("🗑️ Apagar", key=f"delc_{cid}"):
+                                            can_mod = u and (u.get("is_admin",0)==1 or int(u['id'])==int(caid))
+                                            if can_mod:
+                                                cm1, cm2, cm3 = st.columns(3)
+                                                if cm1.button("Editar", key=f"ec_{cid}"):
+                                                    st.session_state[f"editing_comment_{cid}"]=True
+                                                    st.experimental_rerun()
+                                                if cm2.button("🗑️ Apagar", key=f"delc_{cid}"):
                                                     forum_delete_comment(cid)
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
+                                                if st.session_state.get(f"editing_comment_{cid}", False):
+                                                    new_c = st.text_area("Editar comentário", value=cbody or "", key=f"ec_body_{cid}", height=120)
+                                                    sc, cc = st.columns(2)
+                                                    if sc.button("Salvar", key=f"ec_save_{cid}"):
+                                                        forum_update_comment(cid, new_c)
+                                                        st.session_state.pop(f"editing_comment_{cid}", None)
+                                                        st.toast("Comentário atualizado!")
+                                                        st.experimental_rerun()
+                                                    if cc.button("Cancelar", key=f"ec_cancel_{cid}"):
+                                                        st.session_state.pop(f"editing_comment_{cid}", None)
+                                                        st.experimental_rerun()
 
-                                # NOVO: caixa de comentário com NONCE para limpar após envio
+                                # Caixa de novo comentário (com NONCE p/ limpar após envio)
                                 if u:
                                     nonce_key_c = f"comment_nonce_{pid}"
                                     if nonce_key_c not in st.session_state:
@@ -1699,7 +1767,6 @@ if tab_forum is not None:
                                             st.error("O comentário está vazio.")
                                         else:
                                             forum_add_comment(pid, u, nc)
-                                            # incrementa nonce -> widget ganha nova chave -> caixa vem vazia
                                             st.session_state[nonce_key_c] += 1
                                             st.toast("Comentário enviado!")
                                             st.experimental_rerun()
