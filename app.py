@@ -798,6 +798,15 @@ def processar_plano(portal_bytes: bytes,
     finally:
         pass
 
+    # << NEW: salva log antes do ZIP para que entre no .zip
+    log_path = os.path.join(outdir, "maxfield_log.txt")
+    try:
+        with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
+            lf.write(log_buffer.getvalue() or "")
+    except Exception:
+        pass
+
+    # Cria o ZIP (agora já existe maxfield_log.txt para ser incluído)
     zip_path = os.path.join(outdir, f"maxfield_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(outdir):
@@ -806,14 +815,16 @@ def processar_plano(portal_bytes: bytes,
                 fp = os.path.join(root, fn)
                 arc = os.path.relpath(fp, outdir)
                 z.write(fp, arcname=arc)
+
+    # Acrescenta a linha final no log (no disco). A versão no ZIP já está garantida.
     with redirect_stdout(log_buffer):
         print(f"[{time.strftime('%H:%M:%S')}] ZIP pronto em {time.time()-t1:.1f}s; total {time.time()-t0:.1f}s")
-
     log_txt = log_buffer.getvalue()
-
-    log_path = os.path.join(outdir, "maxfield_log.txt")
-    with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
-        lf.write(log_txt or "")
+    try:
+        with open(log_path, "w", encoding="utf-8", errors="ignore") as lf:
+            lf.write(log_txt or "")
+    except Exception:
+        pass
 
     def read_bytes(path):
         return open(path, "rb").read() if os.path.exists(path) else None
@@ -1507,7 +1518,6 @@ if tab_forum is not None:
                 with colA:
                     st.write(f"Logado como **{u['username']}** ({u['faction']}){' · 🛡️ Admin' if u['is_admin'] else ''}")
                 with colB:
-                    # ----- NOVO: botão abre painel full-width abaixo -----
                     if "avatar_open" not in st.session_state:
                         st.session_state["avatar_open"] = False
                     if st.button(("Fechar avatar" if st.session_state["avatar_open"] else "Trocar avatar"),
@@ -1517,7 +1527,6 @@ if tab_forum is not None:
                     if st.button("Sair", key="logout_btn"):
                         signout_current()
 
-            # Painel de troca de avatar (full-width, centralizado)
             if st.session_state.get("avatar_open", False):
                 if "avatar_nonce" not in st.session_state:
                     st.session_state["avatar_nonce"] = 0
@@ -1560,7 +1569,6 @@ if tab_forum is not None:
                             st.session_state["avatar_open"] = False
                             st.experimental_rerun()
 
-            # avatar preview
             av_bytes = user_avatar_bytes(u["id"], u.get("avatar_ext"))
             if av_bytes:
                 st.image(av_bytes, width=80)
@@ -1630,7 +1638,6 @@ if tab_forum is not None:
                     elif cat == "Atualizações" and u and u['is_admin'] != 1:
                         st.caption("_Apenas admin pode publicar em Atualizações._")
 
-                # Lista de posts
                 posts = forum_list_posts(cat)
                 if not posts:
                     st.info("Nenhum tópico ainda.")
@@ -1643,7 +1650,6 @@ if tab_forum is not None:
                         can_edit_post = u and (u.get("is_admin",0)==1 or int(u["id"])==int(author_id))
 
                         with st.container(border=True):
-                            # Cabeçalho do post
                             head_cols = st.columns([0.10, 0.60, 0.30])
                             with head_cols[0]:
                                 if avb:
@@ -1667,7 +1673,6 @@ if tab_forum is not None:
                                             st.success("Tópico removido.")
                                             st.experimental_rerun()
 
-                            # Corpo do post
                             post = forum_get_post(pid)
                             if post:
                                 _id, _cat, _title, _body_md, _aid, _aname, _afac, _cts, _imgs = post
@@ -1687,7 +1692,6 @@ if tab_forum is not None:
                                             with ig_cols[i % len(ig_cols)]:
                                                 st.image(open(p,"rb").read())
 
-                            # Editor inline quando solicitado
                             if can_edit_post and st.session_state.get(f"edit_open_{pid}", False):
                                 with st.container(border=True):
                                     st.markdown("#### Editar tópico")
@@ -1710,7 +1714,6 @@ if tab_forum is not None:
                                         st.session_state[f"edit_open_{pid}"] = False
                                         st.experimental_rerun()
 
-                            # ===== Comentários =====
                             if COMMENTS_ENABLED:
                                 st.markdown("**Comentários:**")
                                 comms = forum_list_comments(pid)
@@ -1739,7 +1742,6 @@ if tab_forum is not None:
                                                     st.success("Comentário apagado.")
                                                     st.experimental_rerun()
 
-                                # caixa de comentário com NONCE para limpar após envio
                                 if u:
                                     nonce_key_c = f"comment_nonce_{pid}"
                                     if nonce_key_c not in st.session_state:
