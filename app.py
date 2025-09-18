@@ -1629,8 +1629,7 @@ if tab_forum is not None:
                                     st.session_state[nonce_key] += 1
                                     st.session_state[exp_key] = False
                                     st.toast("Postagem enviada!")
-                                    st.success("Postagem enviado!
-")
+                                    st.success("Postagem enviado!")
                                     st.experimental_rerun()
                 else:
                     if not u:
