@@ -460,7 +460,7 @@ function wrapper(plugin_info) {
     }
   };
 
-  selfupdateCounter = function(n){
+  self.updateCounter = function(n){
     let el = document.getElementById('mf-portals-counter');
     if (!el) {
       el = document.createElement('div');
@@ -473,16 +473,15 @@ function wrapper(plugin_info) {
 
   self.send = async function(){
     const map = window.map;
-    const zoom = map && map.getZoom ? map.getZoom : 0;
-    if (map && typeof map.getZoom === 'function') {{
-      if (map.getZoom() < self.MIN_ZOOM) {{
+    if (map && typeof map.getZoom === 'function') {
+      if (map.getZoom() < self.MIN_ZOOM) {
         alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\\n\\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
         return;
-      }}
-    }}
+      }
+    }
 
     let lines = self.visiblePortals();
-    selfupdateCounter(lines.length);
+    self.updateCounter(lines.length);
     if (!lines.length) {
       alert('Nenhum portal visível nesta área.\\n\\nMova o mapa e/ou aumente o zoom até os marcadores aparecerem e tente novamente.');
       return;
@@ -514,11 +513,11 @@ function wrapper(plugin_info) {
 
   self.copyListOnly = async function(){
     const lines = self.visiblePortals();
-    selfupdateCounter(lines.length);
-    if (!lines.length) {{
+    self.updateCounter(lines.length);
+    if (!lines.length) {
       alert('Nenhum portal visível para copiar.');
       return;
-    }}
+    }
     const text = lines.slice(0, self.MAX_PORTALS).join('\\n');
     await self.copy(text);
     alert('Lista copiada! Agora cole no campo de texto do Maxfield.');
@@ -555,13 +554,13 @@ function wrapper(plugin_info) {
     const box = document.createElement('div');
     box.id = 'mf-send-btn-float';
     box.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:99999;display:flex;gap:8px';
-    const mk = (label, cb) => {{
+    const mk = (label, cb) => {
       const btn = document.createElement('a');
       btn.textContent = label;
       btn.style.cssText = 'padding:6px 10px;background:#2b8;color:#fff;border-radius:4px;font:12px/1.3 sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)';
-      btn.addEventListener('click', function(e){{ e.preventDefault(); cb(); }});
+      btn.addEventListener('click', function(e){ e.preventDefault(); cb(); });
       return btn;
-    }};
+    };
     box.appendChild(mk('Send to Maxfield', self.send));
     box.appendChild(mk('Copiar lista (txt)', self.copyListOnly));
     (document.body || document.documentElement).appendChild(box);
@@ -747,8 +746,7 @@ if "job_id" not in st.session_state:
         else:
             qp_set(job=None)
 
-# ---------- Processamento principal (cache com TTL) ----------
-@st.cache_data(show_spinner=False, ttl=3600)
+# ---------- Processamento principal (agora sem @st.cache_data) ----------
 def processar_plano(portal_bytes: bytes,
                     num_agents: int,
                     num_cpus: int,
@@ -775,7 +773,8 @@ def processar_plano(portal_bytes: bytes,
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={st.session_state.get('num_cpus',0) if 'num_cpus' in st.session_state else 0} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
+            # Removido acesso a st.session_state na thread
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
@@ -1630,7 +1629,8 @@ if tab_forum is not None:
                                     st.session_state[nonce_key] += 1
                                     st.session_state[exp_key] = False
                                     st.toast("Postagem enviada!")
-                                    st.success("Postagem enviada!")
+                                    st.success("Postagem enviado!
+")
                                     st.experimental_rerun()
                 else:
                     if not u:
