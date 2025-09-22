@@ -651,9 +651,16 @@ script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify
 (document.body || document.documentElement).appendChild(script);
 """
 
-IITC_USERSCRIPT = (
-IITC_USERSCRIPT_TEMPLATE
-    .replace("__DEST__", DEST)
+def build_iitc_userscript(dest: str, min_zoom: int, max_portals: int, max_url_len: int, template: str) -> str:
+    return (
+        template
+        .replace("__DEST__", dest)
+        .replace("self.MIN_ZOOM    = 15;",   f"self.MIN_ZOOM    = {min_zoom};")
+        .replace("self.MAX_PORTALS = 200;",  f"self.MAX_PORTALS = {max_portals};")
+        .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {max_url_len};")
+    )
+
+IITC_USERSCRIPT = build_iitc_userscript(DEST, MIN_ZOOM, MAX_PORTALS, MAX_URL_LEN, IITC_USERSCRIPT_TEMPLATE)
     .replace("self.MIN_ZOOM    = 15;", f"self.MIN_ZOOM    = {MIN_ZOOM};")
     .replace("self.MAX_PORTALS = 200;", f"self.MAX_PORTALS = {MAX_PORTALS};")
     .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {MAX_URL_LEN};")
