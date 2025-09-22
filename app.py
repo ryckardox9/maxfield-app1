@@ -651,8 +651,13 @@ script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify
 (document.body || document.documentElement).appendChild(script);
 """
 
-IITC_USERSCRIPT = (IITC_USERSCRIPT_TEMPLATE
+IITC_USERSCRIPT = (
+IITC_USERSCRIPT_TEMPLATE
     .replace("__DEST__", DEST)
+    .replace("self.MIN_ZOOM    = 15;", f"self.MIN_ZOOM    = {MIN_ZOOM};")
+    .replace("self.MAX_PORTALS = 200;", f"self.MAX_PORTALS = {MAX_PORTALS};")
+    .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {MAX_URL_LEN};")
+)
     .replace("self.MIN_ZOOM    = 15;",   f"self.MIN_ZOOM    = {MIN_ZOOM};")
     .replace("self.MAX_PORTALS = 200;",  f"self.MAX_PORTALS = {MAX_PORTALS};")
     .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {MAX_URL_LEN};")
