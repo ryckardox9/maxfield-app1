@@ -198,7 +198,7 @@ def inc_metric(key: str, delta: int = 1):
     conn.commit()
 
 def get_metric(key: str) -> int:
-    cur = get_db().execute("SELECT value FROM metrics WHERE key=?", (key,))
+    cur = get_db().execute("SELECT value FROM metrics WHERE key= ?", (key,))
     row = cur.fetchone()
     return int(row[0]) if row else 0
 
@@ -392,7 +392,7 @@ IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @id             maxfield-send-portals@HiperionBR
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
 // @category       Misc
-// @version        0.7.0
+// @version        0.8.0
 // @description    Envia os portais visíveis do IITC para maxfield.fun. Botões no toolbox; contador ao vivo; copy txt; mobile friendly.
 // @namespace      https://maxfield.fun/
 // @match          https://intel.ingress.com/*
@@ -410,6 +410,21 @@ function wrapper(plugin_info) {
   self.DEST        = '__DEST__';
 
   const isMobile = /IITC|Android|Mobile/i.test(navigator.userAgent) || !!window.isApp;
+
+  // ---------- Utils ----------
+  self.throttle = function(fn, wait){
+    let last = 0, timer = null;
+    return function(){
+      const now = Date.now();
+      const args = arguments; const ctx = this;
+      if (now - last >= wait){
+        last = now; fn.apply(ctx, args);
+      } else if (!timer){
+        const remain = wait - (now - last);
+        timer = setTimeout(()=>{ last = Date.now(); timer=null; fn.apply(ctx, args); }, Math.max(50, remain));
+      }
+    };
+  };
 
   self.openExternal = function(url){
     try {
@@ -441,6 +456,60 @@ function wrapper(plugin_info) {
     return out;
   };
 
+  // ---------- Contador ao vivo + Feedback de carregamento ----------
+  self.lastMoveTs = 0;
+  self._counterEl = null;
+
+  self.ensureCounterEl = function(){
+    if (self._counterEl) return self._counterEl;
+    const el = document.createElement('div');
+    el.id = 'mf-portals-counter';
+    el.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#111;color:#fff;border-radius:6px;font:12px/1.3 sans-serif;opacity:.88;box-shadow:0 2px 6px rgba(0,0,0,.35)';
+    (document.body || document.documentElement).appendChild(el);
+    self._counterEl = el;
+    return el;
+  };
+
+  self.likelyLoading = function(){
+    // Considera que o mapa ainda está carregando tiles/portais por ~1.5s após movimentos/zoom
+    return (Date.now() - self.lastMoveTs) < 1500;
+  };
+
+  self.updateCounterLive = self.throttle(function(force){
+    const el = self.ensureCounterEl();
+    const map = window.map;
+    if (!(map && typeof map.getZoom === 'function')) { el.textContent = 'IITC não detectado'; return; }
+    const zoom = map.getZoom();
+    if (zoom < self.MIN_ZOOM) {
+      el.textContent = `Zoom insuficiente (min ${self.MIN_ZOOM})`;
+      return;
+    }
+    const lines = self.visiblePortals();
+    const n = lines.length;
+    if (n === 0 && self.likelyLoading()) {
+      el.textContent = 'Carregando portais…';
+    } else {
+      el.textContent = 'Portais visíveis: ' + n + (n>=self.MAX_PORTALS ? ' (limite)' : '');
+    }
+  }, 800);
+
+  self.hookMapEvents = function(){
+    const map = window.map; if (!map || !map.on) return;
+    const markMove = function(){ self.lastMoveTs = Date.now(); self.updateCounterLive(true); };
+    map.on('moveend', markMove);
+    map.on('zoomend', markMove);
+    // tentativa de ouvir eventos de novos portais renderizados
+    try { window.addHook && window.addHook('portalAdded', ()=> self.updateCounterLive(true)); } catch(e){}
+  };
+
+  self.startLiveCounter = function(){
+    self.ensureCounterEl();
+    self.hookMapEvents();
+    self.updateCounterLive(true);
+    // fallback: atualiza periodicamente caso os hooks não disparem
+    setInterval(()=> self.updateCounterLive(false), 1500);
+  };
+
   self.copy = async function(text){
     try {
       await navigator.clipboard.writeText(text);
@@ -460,43 +529,38 @@ function wrapper(plugin_info) {
     }
   };
 
-  self.updateCounter = function(n){
-    let el = document.getElementById('mf-portals-counter');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'mf-portals-counter';
-      el.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#111;color:#fff;border-radius:6px;font:12px/1.3 sans-serif;opacity:.85';
-      (document.body || document.documentElement).appendChild(el);
-    }
+  selfupdateCounter = function(n){
+    const el = self.ensureCounterEl();
     el.textContent = 'Portais visíveis: ' + n + (n>=self.MAX_PORTALS ? ' (limite)' : '');
   };
 
   self.send = async function(){
     const map = window.map;
+    const zoom = map && map.getZoom ? map.getZoom : 0;
     if (map && typeof map.getZoom === 'function') {
       if (map.getZoom() < self.MIN_ZOOM) {
-        alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\\n\\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
+        alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\n\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
         return;
       }
     }
 
     let lines = self.visiblePortals();
-    self.updateCounter(lines.length);
+    selfupdateCounter(lines.length);
     if (!lines.length) {
-      alert('Nenhum portal visível nesta área.\\n\\nMova o mapa e/ou aumente o zoom até os marcadores aparecerem e tente novamente.');
+      alert('Nenhum portal visível nesta área.\n\nMova o mapa e/ou aumente o zoom até os marcadores aparecerem e tente novamente.');
       return;
     }
     if (lines.length > self.MAX_PORTALS) {
-      alert('Foram detectados ' + lines.length + ' portais visíveis.\\nPor estabilidade, enviaremos somente ' + self.MAX_PORTALS + '.\\n\\nDica: aproxime mais e envie em partes para capturar todos.');
+      alert('Foram detectados ' + lines.length + ' portais visíveis.\nPor estabilidade, enviaremos somente ' + self.MAX_PORTALS + '.\n\nDica: aproxime mais e envie em partes para capturar todos.');
       lines = lines.slice(0, self.MAX_PORTALS);
     }
 
-    const text = lines.join('\\n');
+    const text = lines.join('\n');
     const full = self.DEST + '?list=' + encodeURIComponent(text);
 
     if (full.length > self.MAX_URL_LEN) {
       await self.copy(text);
-      alert('A URL ficou muito grande para abrir diretamente.\\n\\n✅ A LISTA DE PORTAIS FOI COPIADA para a área de transferência.\\n\\nComo proceder:\\n1) Abriremos o Maxfield agora.\\n2) No site, COLE a lista no campo de texto.\\n3) Clique em “Gerar plano”.\\n\\nDica: no mobile/IITC, se abrir dentro do app, escolha “abrir no navegador” (Chrome/Firefox).');
+      alert('A URL ficou muito grande para abrir diretamente.\n\n✅ A LISTA DE PORTAIS FOI COPIADA para a área de transferência.\n\nComo proceder:\n1) Abriremos o Maxfield agora.\n2) No site, COLE a lista no campo de texto.\n3) Clique em “Gerar plano”.\n\nDica: no mobile/IITC, se abrir dentro do app, escolha “abrir no navegador” (Chrome/Firefox).');
       self.openExternal(self.DEST);
       return;
     }
@@ -506,19 +570,19 @@ function wrapper(plugin_info) {
 
     if (isMobile) {
       setTimeout(() => {
-        alert('Abrimos o Maxfield em uma nova aba.\\n\\nSe ele abrir DENTRO do IITC, toque em “abrir no navegador” (Chrome/Firefox).\\nO link já foi copiado — se precisar, basta colar na barra de endereços.');
+        alert('Abrimos o Maxfield em uma nova aba.\n\nSe ele abrir DENTRO do IITC, toque em “abrir no navegador” (Chrome/Firefox).\nO link já foi copiado — se precisar, basta colar na barra de endereços.');
       }, 600);
     }
   };
 
   self.copyListOnly = async function(){
     const lines = self.visiblePortals();
-    self.updateCounter(lines.length);
+    selfupdateCounter(lines.length);
     if (!lines.length) {
       alert('Nenhum portal visível para copiar.');
       return;
     }
-    const text = lines.slice(0, self.MAX_PORTALS).join('\\n');
+    const text = lines.slice(0, self.MAX_PORTALS).join('\n');
     await self.copy(text);
     alert('Lista copiada! Agora cole no campo de texto do Maxfield.');
   };
@@ -567,12 +631,13 @@ function wrapper(plugin_info) {
   };
 
   self.mountButtonsRobust = function(){
-    if (self.addToolbarButtons()) return;
+    if (self.addToolbarButtons()) { self.startLiveCounter(); return true; }
     const start = Date.now();
     const intv = setInterval(() => {
-      if (self.addToolbarButtons()) { clearInterval(intv); return; }
-      if (Date.now() - start > 10000) { clearInterval(intv); self.addFloatingButtons(); }
+      if (self.addToolbarButtons()) { clearInterval(intv); self.startLiveCounter(); return; }
+      if (Date.now() - start > 10000) { clearInterval(intv); self.addFloatingButtons(); self.startLiveCounter(); }
     }, 300);
+    return false;
   };
 
   const setup = function(){ self.mountButtonsRobust(); };
@@ -746,7 +811,8 @@ if "job_id" not in st.session_state:
         else:
             qp_set(job=None)
 
-# ---------- Processamento principal (agora sem @st.cache_data) ----------
+# ---------- Processamento principal (cache com TTL) ----------
+@st.cache_data(show_spinner=False, ttl=3600)
 def processar_plano(portal_bytes: bytes,
                     num_agents: int,
                     num_cpus: int,
@@ -773,8 +839,7 @@ def processar_plano(portal_bytes: bytes,
     try:
         with redirect_stdout(log_buffer):
             t("INÍCIO processar_plano")
-            # Removido acesso a st.session_state na thread
-            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
+            print(f"[INFO] os.cpu_count()={os.cpu_count()} · cpus_req={st.session_state.get('num_cpus',0) if 'num_cpus' in st.session_state else 0} · cpus_eff={num_cpus} · gif={fazer_gif} · csv={output_csv} · team={team}")
             t("Chamando run_maxfield()…")
             run_maxfield(
                 portal_path,
@@ -1269,7 +1334,7 @@ def create_user(username: str,
     p_hash = hash_pass(password, salt)
 
     conn = get_db()
-    cur = conn.execute("SELECT 1 FROM users WHERE username_lc=?", (uname_lc,))
+    cur = conn.execute("SELECT 1 FROM users WHERE username_lc= ?", (uname_lc,))
     if cur.fetchone():
         raise ValueError("Este nome de usuário já está em uso.")
 
@@ -1279,7 +1344,7 @@ def create_user(username: str,
     """, (uname, uname_lc, p_hash, salt, fac, mail, None, int(is_admin), ts, ts))
     conn.commit()
 
-    cur = conn.execute("SELECT id FROM users WHERE username_lc=?", (uname_lc,))
+    cur = conn.execute("SELECT id FROM users WHERE username_lc= ?", (uname_lc,))
     row = cur.fetchone()
     if not row:
         raise RuntimeError("Falha ao criar usuário.")
@@ -1294,7 +1359,7 @@ def check_password(user_row: dict, password: str) -> bool:
     if not user_row or not password:
         return False
     conn = get_db()
-    cur = conn.execute("SELECT pass_hash, pass_salt FROM users WHERE id=?", (int(user_row["id"]),))
+    cur = conn.execute("SELECT pass_hash, pass_salt FROM users WHERE id= ?", (int(user_row["id"]),))
     row = cur.fetchone()
     if not row:
         return False
@@ -1338,7 +1403,7 @@ def get_user_by_token(token:str):
 def signout_current():
     token = qp_get("token","")
     if token:
-        get_db().execute("DELETE FROM sessions WHERE token=?", (token,))
+        get_db().execute("DELETE FROM sessions WHERE token= ?", (token,))
         get_db().commit()
     st.session_state.pop("user", None)
     qp_set(token=None)
@@ -1358,7 +1423,7 @@ def current_user():
     return None
 
 def forum_count_comments(post_id:int) -> int:
-    cur = get_db().execute("SELECT COUNT(*) FROM forum_comments WHERE post_id=? AND (deleted_ts IS NULL)", (int(post_id),))
+    cur = get_db().execute("SELECT COUNT(*) FROM forum_comments WHERE post_id= ? AND (deleted_ts IS NULL)", (int(post_id),))
     return int(cur.fetchone()[0])
 
 def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> int:
@@ -1369,7 +1434,7 @@ def forum_create_post(cat:str, title:str, body_md:str, images, author:dict) -> i
         VALUES(?,?,?,?,?,?,?,?,?,0)
     """, (cat, title.strip(), body_md.strip(), int(author["id"]), author["username"], author["faction"], ts, ts, "[]"))
     conn.commit()
-    cur = conn.execute("SELECT id FROM forum_posts WHERE author_id=? ORDER BY id DESC LIMIT 1", (int(author["id"]),))
+    cur = conn.execute("SELECT id FROM forum_posts WHERE author_id= ? ORDER BY id DESC LIMIT 1", (int(author["id"]),))
     row = cur.fetchone()
     post_id = int(row[0])
 
@@ -1629,7 +1694,7 @@ if tab_forum is not None:
                                     st.session_state[nonce_key] += 1
                                     st.session_state[exp_key] = False
                                     st.toast("Postagem enviada!")
-                                    st.success("Postagem enviado!")
+                                    st.success("Postagem enviada!")
                                     st.experimental_rerun()
                 else:
                     if not u:
@@ -1643,7 +1708,7 @@ if tab_forum is not None:
                 else:
                     for (pid, title, author_name, author_faction, cts, images_json, author_id) in posts:
                         cnt = forum_count_comments(pid)
-                        user_row = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(author_id),)).fetchone()
+                        user_row = get_db().execute("SELECT avatar_ext FROM users WHERE id= ?", (int(author_id),)).fetchone()
                         av_ext = user_row[0] if user_row else None
                         avb = user_avatar_bytes(author_id, av_ext)
                         can_edit_post = u and (u.get("is_admin",0)==1 or int(u["id"])==int(author_id))
@@ -1666,8 +1731,8 @@ if tab_forum is not None:
                                 with colb2:
                                     if can_edit_post:
                                         if st.button("Apagar", key=f"del_post_{pid}", use_container_width=True):
-                                            get_db().execute("DELETE FROM forum_posts WHERE id=?", (int(pid),))
-                                            get_db().execute("DELETE FROM forum_comments WHERE post_id=?", (int(pid),))
+                                            get_db().execute("DELETE FROM forum_posts WHERE id= ?", (int(pid),))
+                                            get_db().execute("DELETE FROM forum_comments WHERE post_id= ?", (int(pid),))
                                             get_db().commit()
                                             st.success("Tópico removido.")
                                             st.experimental_rerun()
@@ -1725,7 +1790,7 @@ if tab_forum is not None:
                                             continue
                                         row_cols = st.columns([0.1,0.9])
                                         with row_cols[0]:
-                                            cav_row = get_db().execute("SELECT avatar_ext FROM users WHERE id=?", (int(caid),)).fetchone()
+                                            cav_row = get_db().execute("SELECT avatar_ext FROM users WHERE id= ?", (int(caid),)).fetchone()
                                             cav_ext = cav_row[0] if cav_row else None
                                             cav_bytes = user_avatar_bytes(caid, cav_ext)
                                             if cav_bytes:
