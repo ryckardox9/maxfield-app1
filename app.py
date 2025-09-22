@@ -393,7 +393,7 @@ IITC_USERSCRIPT_TEMPLATE = """// ==UserScript==
 // @name           Maxfield — Send Portals (mobile-safe + toolbox button)
 // @category       Misc
 // @version        0.8.0
-// @description    Envia os portais visíveis do IITC para maxfield.fun. Botões no toolbox; contador ao vivo; copy txt; mobile friendly.
+// @description    Envia os portais visíveis do IITC para maxfield.fun. Botões no toolbox; contador ao vivo; feedback de carregamento.
 // @namespace      https://maxfield.fun/
 // @match          https://intel.ingress.com/*
 // @grant          none
@@ -410,21 +410,6 @@ function wrapper(plugin_info) {
   self.DEST        = '__DEST__';
 
   const isMobile = /IITC|Android|Mobile/i.test(navigator.userAgent) || !!window.isApp;
-
-  // ---------- Utils ----------
-  self.throttle = function(fn, wait){
-    let last = 0, timer = null;
-    return function(){
-      const now = Date.now();
-      const args = arguments; const ctx = this;
-      if (now - last >= wait){
-        last = now; fn.apply(ctx, args);
-      } else if (!timer){
-        const remain = wait - (now - last);
-        timer = setTimeout(()=>{ last = Date.now(); timer=null; fn.apply(ctx, args); }, Math.max(50, remain));
-      }
-    };
-  };
 
   self.openExternal = function(url){
     try {
@@ -456,60 +441,6 @@ function wrapper(plugin_info) {
     return out;
   };
 
-  // ---------- Contador ao vivo + Feedback de carregamento ----------
-  self.lastMoveTs = 0;
-  self._counterEl = null;
-
-  self.ensureCounterEl = function(){
-    if (self._counterEl) return self._counterEl;
-    const el = document.createElement('div');
-    el.id = 'mf-portals-counter';
-    el.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#111;color:#fff;border-radius:6px;font:12px/1.3 sans-serif;opacity:.88;box-shadow:0 2px 6px rgba(0,0,0,.35)';
-    (document.body || document.documentElement).appendChild(el);
-    self._counterEl = el;
-    return el;
-  };
-
-  self.likelyLoading = function(){
-    // Considera que o mapa ainda está carregando tiles/portais por ~1.5s após movimentos/zoom
-    return (Date.now() - self.lastMoveTs) < 1500;
-  };
-
-  self.updateCounterLive = self.throttle(function(force){
-    const el = self.ensureCounterEl();
-    const map = window.map;
-    if (!(map && typeof map.getZoom === 'function')) { el.textContent = 'IITC não detectado'; return; }
-    const zoom = map.getZoom();
-    if (zoom < self.MIN_ZOOM) {
-      el.textContent = `Zoom insuficiente (min ${self.MIN_ZOOM})`;
-      return;
-    }
-    const lines = self.visiblePortals();
-    const n = lines.length;
-    if (n === 0 && self.likelyLoading()) {
-      el.textContent = 'Carregando portais…';
-    } else {
-      el.textContent = 'Portais visíveis: ' + n + (n>=self.MAX_PORTALS ? ' (limite)' : '');
-    }
-  }, 800);
-
-  self.hookMapEvents = function(){
-    const map = window.map; if (!map || !map.on) return;
-    const markMove = function(){ self.lastMoveTs = Date.now(); self.updateCounterLive(true); };
-    map.on('moveend', markMove);
-    map.on('zoomend', markMove);
-    // tentativa de ouvir eventos de novos portais renderizados
-    try { window.addHook && window.addHook('portalAdded', ()=> self.updateCounterLive(true)); } catch(e){}
-  };
-
-  self.startLiveCounter = function(){
-    self.ensureCounterEl();
-    self.hookMapEvents();
-    self.updateCounterLive(true);
-    // fallback: atualiza periodicamente caso os hooks não disparem
-    setInterval(()=> self.updateCounterLive(false), 1500);
-  };
-
   self.copy = async function(text){
     try {
       await navigator.clipboard.writeText(text);
@@ -529,38 +460,92 @@ function wrapper(plugin_info) {
     }
   };
 
-  selfupdateCounter = function(n){
-    const el = self.ensureCounterEl();
+  self.updateCounter = function(n, loading){
+    let el = document.getElementById('mf-portals-counter');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'mf-portals-counter';
+      el.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:99999;padding:6px 10px;background:#111;color:#fff;border-radius:6px;font:12px/1.3 sans-serif;opacity:.85';
+      (document.body || document.documentElement).appendChild(el);
+    }
+    if (loading) {
+      el.textContent = 'Carregando portais…';
+      return;
+    }
     el.textContent = 'Portais visíveis: ' + n + (n>=self.MAX_PORTALS ? ' (limite)' : '');
   };
 
+  let _pendingRefresh = null;
+  let _lastCount = -1;
+
+  function refreshCount(){
+    const lines = self.visiblePortals();
+    _lastCount = lines.length;
+    self.updateCounter(_lastCount, false);
+  }
+
+  function scheduleCountAfterLoad(){
+    if (_pendingRefresh) clearTimeout(_pendingRefresh);
+    self.updateCounter(_lastCount, true);
+    _pendingRefresh = setTimeout(refreshCount, 800); // dá tempo do IITC renderizar/filtrar
+  }
+
+  self.attachMapListeners = function(){
+    const map = window.map;
+    if (!map || !map.on) return;
+    map.on('moveend', scheduleCountAfterLoad);
+    map.on('zoomend', scheduleCountAfterLoad);
+  };
+
+  // Fallback: atualiza a cada 2s (útil quando os hooks não disparam)
+  setInterval(() => {
+    if (!window.map) return;
+    refreshCount();
+  }, 2000);
+
   self.send = async function(){
     const map = window.map;
-    const zoom = map && map.getZoom ? map.getZoom : 0;
     if (map && typeof map.getZoom === 'function') {
       if (map.getZoom() < self.MIN_ZOOM) {
-        alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').\n\nDica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
+        alert('Zoom insuficiente (mínimo ' + self.MIN_ZOOM + ').
+
+Dica: aproxime com o botão + até enquadrar apenas a área desejada, e tente novamente.');
         return;
       }
     }
 
     let lines = self.visiblePortals();
-    selfupdateCounter(lines.length);
+    self.updateCounter(lines.length, false);
     if (!lines.length) {
-      alert('Nenhum portal visível nesta área.\n\nMova o mapa e/ou aumente o zoom até os marcadores aparecerem e tente novamente.');
+      alert('Nenhum portal visível nesta área.
+
+Mova o mapa e/ou aumente o zoom até os marcadores aparecerem e tente novamente.');
       return;
     }
     if (lines.length > self.MAX_PORTALS) {
-      alert('Foram detectados ' + lines.length + ' portais visíveis.\nPor estabilidade, enviaremos somente ' + self.MAX_PORTALS + '.\n\nDica: aproxime mais e envie em partes para capturar todos.');
+      alert('Foram detectados ' + lines.length + ' portais visíveis.
+Por estabilidade, enviaremos somente ' + self.MAX_PORTALS + '.
+
+Dica: aproxime mais e envie em partes para capturar todos.');
       lines = lines.slice(0, self.MAX_PORTALS);
     }
 
-    const text = lines.join('\n');
+    const text = lines.join('
+');
     const full = self.DEST + '?list=' + encodeURIComponent(text);
 
     if (full.length > self.MAX_URL_LEN) {
       await self.copy(text);
-      alert('A URL ficou muito grande para abrir diretamente.\n\n✅ A LISTA DE PORTAIS FOI COPIADA para a área de transferência.\n\nComo proceder:\n1) Abriremos o Maxfield agora.\n2) No site, COLE a lista no campo de texto.\n3) Clique em “Gerar plano”.\n\nDica: no mobile/IITC, se abrir dentro do app, escolha “abrir no navegador” (Chrome/Firefox).');
+      alert('A URL ficou muito grande para abrir diretamente.
+
+✅ A LISTA DE PORTAIS FOI COPIADA para a área de transferência.
+
+Como proceder:
+1) Abriremos o Maxfield agora.
+2) No site, COLE a lista no campo de texto.
+3) Clique em “Gerar plano”.
+
+Dica: no mobile/IITC, se abrir dentro do app, escolha “abrir no navegador” (Chrome/Firefox).');
       self.openExternal(self.DEST);
       return;
     }
@@ -570,19 +555,23 @@ function wrapper(plugin_info) {
 
     if (isMobile) {
       setTimeout(() => {
-        alert('Abrimos o Maxfield em uma nova aba.\n\nSe ele abrir DENTRO do IITC, toque em “abrir no navegador” (Chrome/Firefox).\nO link já foi copiado — se precisar, basta colar na barra de endereços.');
+        alert('Abrimos o Maxfield em uma nova aba.
+
+Se ele abrir DENTRO do IITC, toque em “abrir no navegador” (Chrome/Firefox).
+O link já foi copiado — se precisar, basta colar na barra de endereços.');
       }, 600);
     }
   };
 
   self.copyListOnly = async function(){
     const lines = self.visiblePortals();
-    selfupdateCounter(lines.length);
+    self.updateCounter(lines.length, false);
     if (!lines.length) {
       alert('Nenhum portal visível para copiar.');
       return;
     }
-    const text = lines.slice(0, self.MAX_PORTALS).join('\n');
+    const text = lines.slice(0, self.MAX_PORTALS).join('
+');
     await self.copy(text);
     alert('Lista copiada! Agora cole no campo de texto do Maxfield.');
   };
@@ -631,16 +620,20 @@ function wrapper(plugin_info) {
   };
 
   self.mountButtonsRobust = function(){
-    if (self.addToolbarButtons()) { self.startLiveCounter(); return true; }
+    if (self.addToolbarButtons()) return true;
     const start = Date.now();
     const intv = setInterval(() => {
-      if (self.addToolbarButtons()) { clearInterval(intv); self.startLiveCounter(); return; }
-      if (Date.now() - start > 10000) { clearInterval(intv); self.addFloatingButtons(); self.startLiveCounter(); }
+      if (self.addToolbarButtons()) { clearInterval(intv); return; }
+      if (Date.now() - start > 10000) { clearInterval(intv); self.addFloatingButtons(); }
     }, 300);
     return false;
   };
 
-  const setup = function(){ self.mountButtonsRobust(); };
+  const setup = function(){
+    self.mountButtonsRobust();
+    self.attachMapListeners();
+    scheduleCountAfterLoad();
+  };
   setup.info = plugin_info;
 
   if (!window.bootPlugins) window.bootPlugins = [];
@@ -660,6 +653,10 @@ script.appendChild(document.createTextNode('(' + wrapper + ')(' + JSON.stringify
 
 IITC_USERSCRIPT = (IITC_USERSCRIPT_TEMPLATE
     .replace("__DEST__", DEST)
+    .replace("self.MIN_ZOOM    = 15;",   f"self.MIN_ZOOM    = {MIN_ZOOM};")
+    .replace("self.MAX_PORTALS = 200;",  f"self.MAX_PORTALS = {MAX_PORTALS};")
+    .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {MAX_URL_LEN};")
+)
     .replace("self.MIN_ZOOM    = 15;",   f"self.MIN_ZOOM    = {MIN_ZOOM};")
     .replace("self.MAX_PORTALS = 200;",  f"self.MAX_PORTALS = {MAX_PORTALS};")
     .replace("self.MAX_URL_LEN = 6000;", f"self.MAX_URL_LEN = {MAX_URL_LEN};")
